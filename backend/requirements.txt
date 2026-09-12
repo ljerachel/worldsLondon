@@ -1,0 +1,6 @@
+fastapi[standard]
+fal-client
+openai
+httpx
+python-multipart
+modal

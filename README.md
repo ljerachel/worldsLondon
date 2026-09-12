@@ -1,22 +1,27 @@
-# HOME FOR CHRISTMAS
+# &Coach: Your London
 
-Personalised Coca-Cola "Holidays Are Coming" playable ad — 5-hour hackathon build.
+Experiential playable ad — 5-hour hackathon build.
 
-Judge scans a QR, answers 3 questions, and the Coke truck rolls into a live-generated
-Christmas market in *their* hometown (Reactor `reactor/helios`). They get a personalised
-video Christmas card where Santa says their name (VEED Fabric via fal.ai). A projector
-dashboard shows a world map of every judge's Christmas plus an AI-reasoned media plan.
-Backend runs on Modal.
+A Coach poster on the Tube carries a QR code. Scan it and you step into Coach's London:
+a live-generated street in your neighbourhood (Reactor `lingbot-world-2`), walk to the
+Coach store, see yourself wearing the look live (Reactor `x2`), and leave with a 9-second
+"&Coach — {Name}'s chapter" film (VEED Fabric via fal.ai). The projector dashboard shows
+a map of every visitor's London plus an AI-reasoned media plan. Backend runs on Modal.
 
 Full build spec (timeline, contracts, per-builder tickets, demo script):
-[HOME_FOR_CHRISTMAS_BUILD_SPEC.md](HOME_FOR_CHRISTMAS_BUILD_SPEC.md)
+[COACH_LONDON_BUILD_SPEC.md](COACH_LONDON_BUILD_SPEC.md)
 
 ## Layout
 
 ```
-frontend/   Vite + React + TypeScript + Tailwind, deployed on Vercel
-backend/    Modal app: FastAPI + modal.Dict (no DB), fal.ai + OpenAI jobs
-content/    santa.png, jingle.mp3, fallback clips
+frontend/          Vite + React + TypeScript + Tailwind, deployed on Vercel
+  src/pages/       Qr.tsx (/) · Play.tsx (/play) · Dash.tsx (/dash)
+  src/lib/         api.ts · world.ts (LingBot) · mirror.ts (X2)
+  src/data/        config.ts — NEIGHBOURHOODS / CHAPTERS / BAGS
+  public/looks/    look boards {bag}-{1..3}.png (pre-generated)
+  public/neigh/    anchor stills {neigh}-{chapter}.png (pre-generated)
+backend/           app.py (Modal FastAPI + modal.Dict) · prompts.py · gen_assets.py
+RUNBOOK.md
 ```
 
 ## Quick start
@@ -34,10 +39,10 @@ Backend:
 cd backend
 pip install -r requirements.txt
 modal setup
-modal secret create hfc-secrets REACTOR_API_KEY=... FAL_KEY=... OPENAI_API_KEY=...
+modal secret create coach-secrets REACTOR_API_KEY=... FAL_KEY=... OPENAI_API_KEY=... FRONTEND_ORIGIN=https://<vercel-url>
 modal deploy app.py    # or: modal serve app.py
 ```
 
-Keys needed: `REACTOR_API_KEY`, `FAL_KEY`, `OPENAI_API_KEY`, Modal + Vercel accounts.
+Keys needed: `REACTOR_API_KEY` (rk_…), `FAL_KEY`, `OPENAI_API_KEY`, Modal + Vercel accounts.
 
-Concept demo for Coca-Cola. Not affiliated.
+Concept demo. Not affiliated with Coach / Tapestry.
