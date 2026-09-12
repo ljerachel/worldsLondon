@@ -1,9 +1,8 @@
 """Reactor-backed media generation, shared by app.py (Modal) and gen_assets.py (local).
 
-Replaces the fal.ai calls:
+Media paths:
 - grab_still(): a Helios session is opened per asset and a frame is captured once
-  the scene starts streaming — Reactor has no text-to-image model, so stills are
-  pulled from real-time video instead of flux.
+  the scene starts streaming; stills are pulled from real-time video.
 - render_take(): drives reactor/ltx2 (photo + script -> lip-synced video+audio in
   one pass) and buffers the streamed frames/PCM.
 - save_still() / encode_mp4(): Pillow crop + ffmpeg encode helpers.
@@ -54,9 +53,13 @@ def save_still(frame: np.ndarray, path: pathlib.Path, aspect: str = "9:16") -> N
     img = Image.fromarray(frame)
     w, h = img.size
     aw, ah = (int(x) for x in aspect.split(":"))
-    target_w = min(w, int(h * aw / ah))
+    if w * ah > h * aw:
+        target_w, target_h = int(h * aw / ah), h
+    else:
+        target_w, target_h = w, int(w * ah / aw)
     left = (w - target_w) // 2
-    img.crop((left, 0, left + target_w, h)).save(path)
+    top = (h - target_h) // 2
+    img.crop((left, top, left + target_w, top + target_h)).save(path)
 
 
 def fit_avatar(src_path: str, dst_path: pathlib.Path, size: tuple[int, int] = (640, 352)) -> None:
