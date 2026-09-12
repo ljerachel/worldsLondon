@@ -1,6 +1,6 @@
 import { useCallback, useEffect, useRef, useState } from 'react'
 import Mirror from '../components/Mirror'
-import { BAGS, CHAPTERS, NEIGHBOURHOODS } from '../data/config'
+import { BAGS, CHAPTERS, COACH, NEIGHBOURHOODS } from '../data/config'
 import type { BagKey, ChapterKey, NeighbourhoodKey } from '../data/config'
 import { api } from '../lib/api'
 import type { Session } from '../lib/api'
@@ -31,9 +31,10 @@ type OrientationPermissionEvent = typeof DeviceOrientationEvent & {
   requestPermission?: () => Promise<'granted' | 'denied'>
 }
 
-const screenClass = 'relative h-[100dvh] w-full overflow-hidden touch-none bg-black text-[#F3EBDD]'
+const screenClass = 'relative h-[100dvh] w-full overflow-hidden touch-none text-[#F3EBDD]'
+const screenStyle = { backgroundColor: COACH.black }
 const choiceClass =
-  'min-h-16 w-full rounded-full border border-[#B3894F]/70 bg-black/30 px-6 py-4 text-left text-lg tracking-wide transition active:scale-[0.98]'
+  'min-h-16 w-full rounded-full border border-[#B3894F]/70 px-6 py-4 text-left text-lg tracking-wide transition active:scale-[0.98]'
 
 function BrandMark() {
   return (
@@ -45,7 +46,7 @@ function BrandMark() {
 
 function Entry({ loading, error, onEnter }: { loading: boolean; error: string; onEnter: () => void }) {
   return (
-    <main className={`${screenClass} flex items-center justify-center px-8`}>
+    <main className={`${screenClass} flex items-center justify-center px-8`} style={screenStyle}>
       <div className="absolute inset-0 bg-[radial-gradient(circle_at_center,rgba(179,137,79,0.28),transparent_35%)]" />
       <div className="relative flex w-full max-w-md flex-col items-center text-center">
         <div className="mb-12 flex h-24 w-24 items-center justify-center rounded-full border border-[#B3894F]/60 font-serif text-6xl text-[#B3894F] shadow-[0_0_70px_rgba(179,137,79,0.38)]">
@@ -73,7 +74,7 @@ function Entry({ loading, error, onEnter }: { loading: boolean; error: string; o
 
 function QuestionFrame({ eyebrow, title, children }: { eyebrow: string; title: string; children: React.ReactNode }) {
   return (
-    <main className={`${screenClass} overflow-y-auto px-6 py-8`}>
+    <main className={`${screenClass} overflow-y-auto px-6 py-8`} style={screenStyle}>
       <div className="mx-auto flex min-h-full w-full max-w-md flex-col">
         <BrandMark />
         <div className="my-auto py-10">
@@ -117,6 +118,7 @@ function Questions({ id, onComplete }: { id: string; onComplete: (session: Sessi
               <button
                 type="button"
                 className={choiceClass}
+                style={{ backgroundColor: `${COACH.black}4d` }}
                 key={key}
                 onClick={() => {
                   setNeighbourhood(key)
@@ -140,6 +142,7 @@ function Questions({ id, onComplete }: { id: string; onComplete: (session: Sessi
             <button
               type="button"
               className={choiceClass}
+              style={{ backgroundColor: `${COACH.black}4d` }}
               key={key}
               onClick={() => {
                 setChapter(key)
@@ -162,7 +165,8 @@ function Questions({ id, onComplete }: { id: string; onComplete: (session: Sessi
             <button
               type="button"
               aria-label={label}
-              className="relative min-h-48 overflow-hidden rounded-3xl border border-[#B3894F]/60 bg-[linear-gradient(145deg,#2a2118,#0a0a0a)] p-3 text-left transition active:scale-[0.98]"
+              className="relative min-h-48 overflow-hidden rounded-3xl border border-[#B3894F]/60 p-3 text-left transition active:scale-[0.98]"
+              style={{ background: `linear-gradient(145deg, #2a2118, ${COACH.black})` }}
               key={key}
               onClick={() => {
                 setBag(key)
@@ -209,7 +213,8 @@ function Questions({ id, onComplete }: { id: string; onComplete: (session: Sessi
         <button
           type="submit"
           disabled={submitting}
-          className="mt-5 min-h-16 w-full rounded-full bg-[#F3EBDD] px-6 font-medium text-black transition active:scale-[0.98] disabled:opacity-60"
+          className="mt-5 min-h-16 w-full rounded-full bg-[#F3EBDD] px-6 font-medium transition active:scale-[0.98] disabled:opacity-60"
+          style={{ color: COACH.black }}
         >
           {submitting ? 'Building your street…' : 'Continue to your London'}
         </button>
@@ -382,6 +387,7 @@ function Street({
   return (
     <main
       className={screenClass}
+      style={screenStyle}
       onTouchStart={(event) => {
         swipeStartedRef.current = event.touches[0]?.clientX ?? null
       }}
@@ -389,8 +395,11 @@ function Street({
     >
       <div
         data-testid="street-fallback"
-        className="absolute -inset-8 overflow-hidden bg-[radial-gradient(circle_at_55%_40%,#8a1f2d_0%,#3a2418_34%,#090909_75%)] transition-transform duration-300"
-        style={{ transform: `translateX(${parallax * -10}px) scale(1.08)` }}
+        className="absolute -inset-8 overflow-hidden transition-transform duration-300"
+        style={{
+          background: `radial-gradient(circle at 55% 40%, ${COACH.red} 0%, #3a2418 34%, ${COACH.black} 75%)`,
+          transform: `translateX(${parallax * -10}px) scale(1.08)`,
+        }}
       >
         <div className="absolute inset-0 opacity-30 [background-image:linear-gradient(115deg,transparent_30%,rgba(243,235,221,.28)_50%,transparent_70%)]" />
         <div className="absolute inset-x-0 bottom-36 text-center font-serif text-2xl text-[#B3894F]/70">Exploring {neighbourhoodLabel}</div>
@@ -410,10 +419,16 @@ function Street({
         playsInline
         className={`absolute inset-0 h-full w-full object-cover transition-opacity duration-700 ${hasFrame && !showingFallback ? 'opacity-100' : 'pointer-events-none opacity-0'}`}
       />
-      <div className="absolute inset-0 bg-gradient-to-b from-black/55 via-transparent to-black/70" />
+      <div
+        className="absolute inset-0"
+        style={{ background: `linear-gradient(to bottom, ${COACH.black}8c, transparent, ${COACH.black}b3)` }}
+      />
       <div className="absolute inset-x-0 top-0 flex items-start justify-between p-5 pt-[max(1.25rem,env(safe-area-inset-top))]">
         <BrandMark />
-        <div className="rounded-full border border-white/25 bg-black/45 px-3 py-2 text-[10px] uppercase tracking-[0.18em] backdrop-blur">
+        <div
+          className="rounded-full border border-white/25 px-3 py-2 text-[10px] uppercase tracking-[0.18em] backdrop-blur"
+          style={{ backgroundColor: `${COACH.black}73` }}
+        >
           {showingFallback ? 'Still mode' : hasFrame ? `${latency ?? '—'} ms` : 'Opening street'}
         </div>
       </div>
@@ -424,7 +439,11 @@ function Street({
         </h1>
       </div>
       {statusError && (
-        <div role="alert" className="absolute left-5 right-5 top-1/2 rounded-2xl border border-[#B3894F]/60 bg-black/70 p-4 text-sm backdrop-blur">
+        <div
+          role="alert"
+          className="absolute left-5 right-5 top-1/2 rounded-2xl border border-[#B3894F]/60 p-4 text-sm backdrop-blur"
+          style={{ backgroundColor: `${COACH.black}b3` }}
+        >
           <p>{statusError} You can keep walking in still mode.</p>
           <button
             type="button"
@@ -444,7 +463,11 @@ function Street({
         <button
           type="button"
           onClick={onEnterStore}
-          className={`min-h-14 rounded-full border px-7 text-sm uppercase tracking-[0.18em] backdrop-blur transition ${enterReady ? 'animate-pulse border-[#F3EBDD] bg-[#B3894F] text-black' : 'border-[#B3894F]/70 bg-black/45'}`}
+          className={`min-h-14 rounded-full border px-7 text-sm uppercase tracking-[0.18em] backdrop-blur transition ${enterReady ? 'animate-pulse border-[#F3EBDD]' : 'border-[#B3894F]/70'}`}
+          style={{
+            backgroundColor: enterReady ? COACH.tan : `${COACH.black}73`,
+            color: enterReady ? COACH.black : COACH.cream,
+          }}
         >
           Enter Coach
         </button>
@@ -471,7 +494,13 @@ function Street({
 
 export function MirrorStage({ session, jwt }: MirrorStageProps) {
   return (
-    <section data-testid="mirror-stage" data-session-id={session.id} data-token-ready={jwt ? 'true' : 'false'} className={screenClass}>
+    <section
+      data-testid="mirror-stage"
+      data-session-id={session.id}
+      data-token-ready={jwt ? 'true' : 'false'}
+      className={screenClass}
+      style={screenStyle}
+    >
       <Mirror />
     </section>
   )
@@ -479,7 +508,12 @@ export function MirrorStage({ session, jwt }: MirrorStageProps) {
 
 export function FilmStage({ session }: FilmStageProps) {
   return (
-    <section data-testid="film-stage" data-session-id={session.id} className={`${screenClass} flex items-center justify-center px-8 text-center`}>
+    <section
+      data-testid="film-stage"
+      data-session-id={session.id}
+      className={`${screenClass} flex items-center justify-center px-8 text-center`}
+      style={screenStyle}
+    >
       <div>
         <BrandMark />
         <h1 className="mt-6 font-serif text-5xl">Your chapter is next.</h1>

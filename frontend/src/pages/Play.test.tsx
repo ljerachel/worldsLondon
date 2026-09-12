@@ -1,6 +1,7 @@
 import { render, screen, waitFor } from '@testing-library/react'
 import userEvent from '@testing-library/user-event'
 import { beforeEach, describe, expect, it, vi } from 'vitest'
+import { COACH } from '../data/config'
 import type { Session } from '../lib/api'
 import Play from './Play'
 
@@ -90,6 +91,16 @@ describe('Play', () => {
         static requestPermission = mocks.requestPermission
       },
     })
+  })
+
+  it('uses the exact configured Coach black on branded stage surfaces', async () => {
+    const user = userEvent.setup()
+    render(<Play />)
+
+    expect(screen.getByRole('main')).toHaveStyle({ backgroundColor: COACH.black })
+    await user.click(screen.getByRole('button', { name: "Tap to enter Coach's London" }))
+    expect(await screen.findByRole('heading', { name: "Where's your London?" })).toBeInTheDocument()
+    expect(screen.getByRole('main')).toHaveStyle({ backgroundColor: COACH.black })
   })
 
   it('starts the session and token prefetch from the entry gesture', async () => {
