@@ -5,7 +5,8 @@ Experiential playable ad — 5-hour hackathon build.
 A Coach poster on the Tube carries a QR code. Scan it and you step into Coach's London:
 a live-generated street in your neighbourhood (Reactor `lingbot-world-2`), walk to the
 Coach store, see yourself wearing the look live (Reactor `x2`), and leave with a 9-second
-"&Coach — {Name}'s chapter" film (VEED Fabric via fal.ai). The projector dashboard shows
+"&Coach — {Name}'s chapter" film (Reactor `ltx2` — selfie + script → lip-synced
+video+audio in one pass). The projector dashboard shows
 a map of every visitor's London plus an AI-reasoned media plan. Backend runs on Modal.
 
 Full build spec (timeline, contracts, per-builder tickets, demo script):
@@ -20,7 +21,7 @@ frontend/          Vite + React + TypeScript + Tailwind, deployed on Vercel
   src/data/        config.ts — NEIGHBOURHOODS / CHAPTERS / BAGS
   public/looks/    look boards {bag}-{1..3}.png (pre-generated)
   public/neigh/    anchor stills {neigh}-{chapter}.png (pre-generated)
-backend/           app.py (Modal FastAPI + modal.Dict) · prompts.py · gen_assets.py
+backend/           app.py (Modal FastAPI + modal.Dict + coach-files volume) · prompts.py · reactor_utils.py (Helios stills, LTX films) · gen_assets.py
 RUNBOOK.md
 ```
 
@@ -39,10 +40,10 @@ Backend:
 cd backend
 pip install -r requirements.txt
 modal setup
-modal secret create coach-secrets REACTOR_API_KEY=... FAL_KEY=... OPENAI_API_KEY=... FRONTEND_ORIGIN=https://<vercel-url>
+modal secret create coach-secrets REACTOR_API_KEY=... OPENAI_API_KEY=... FRONTEND_ORIGIN=https://<vercel-url>
 modal deploy app.py    # or: modal serve app.py
 ```
 
-Keys needed: `REACTOR_API_KEY` (rk_…), `FAL_KEY`, `OPENAI_API_KEY`, Modal + Vercel accounts.
+Keys needed: `REACTOR_API_KEY` (rk_…, covers all generation incl. the film), `OPENAI_API_KEY`, Modal + Vercel accounts.
 
 Concept demo. Not affiliated with Coach / Tapestry.
