@@ -1,39 +1,57 @@
+import { StrictMode } from 'react'
 import { act, fireEvent, render, screen, waitFor } from '@testing-library/react'
 import userEvent from '@testing-library/user-event'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import { COACH } from '../data/config'
 import type { Session } from '../lib/api'
+import type { ImmersiveWorldProps } from '../components/ImmersiveWorld'
+import { WorldCleanupError } from '../lib/world'
 import type { WorldHandle } from '../lib/world'
-import Play, { FilmStage } from './Play'
+import Play from './Play'
 
 const mocks = vi.hoisted(() => ({
   createSession: vi.fn(),
+  getImmersiveWorld: vi.fn(),
   reactorToken: vi.fn(),
   sendAnswers: vi.fn(),
   sendEvent: vi.fn(),
+  uploadSelfie: vi.fn(),
   startFilm: vi.fn(),
-  getSession: vi.fn(),
   openWorld: vi.fn(),
   move: vi.fn(),
   strafe: vi.fn(),
   look: vi.fn(),
   steer: vi.fn(),
   close: vi.fn(),
-  requestPermission: vi.fn(),
+  retryResult: vi.fn(),
 }))
 
 vi.mock('../lib/api', () => ({
   api: {
     createSession: mocks.createSession,
+    getImmersiveWorld: mocks.getImmersiveWorld,
     reactorToken: mocks.reactorToken,
     sendAnswers: mocks.sendAnswers,
     sendEvent: mocks.sendEvent,
+    uploadSelfie: mocks.uploadSelfie,
     startFilm: mocks.startFilm,
-    getSession: mocks.getSession,
   },
 }))
 
-vi.mock('../lib/world', () => ({ openWorld: mocks.openWorld }))
+vi.mock('../lib/world', async (importOriginal) => ({
+  ...await importOriginal<typeof import('../lib/world')>(),
+  openWorld: mocks.openWorld,
+}))
+
+vi.mock('../components/ImmersiveWorld', () => ({
+  default: ({ jwt, onViewProduct, onRetryToken }: ImmersiveWorldProps) => (
+    <section data-testid="immersive-world" data-jwt={jwt ?? 'fallback'}>
+      <button type="button" onClick={() => { void onRetryToken?.().then(mocks.retryResult) }}>Retry live garden</button>
+      <button type="button" onClick={() => onViewProduct('tabby')}>Explore Tabby</button>
+      <button type="button" onClick={() => onViewProduct('brooklyn')}>Explore Brooklyn</button>
+    </section>
+  ),
+}))
 
 const session: Session = {
   id: 'session-1',
@@ -60,17 +78,34 @@ const session: Session = {
 async function reachStreet(name = 'Maya') {
   const user = userEvent.setup()
   await user.click(screen.getByRole('button', { name: "Tap to enter Coach's London" }))
-  expect(await screen.findByRole('heading', { name: "Where's your London?" })).toBeInTheDocument()
-  await user.click(screen.getByRole('button', { name: 'Soho' }))
-  expect(screen.getByRole('heading', { name: "What's the next chapter?" })).toBeInTheDocument()
+  await user.click(await screen.findByRole('button', { name: 'Soho' }))
   await user.click(screen.getByRole('button', { name: 'Big night' }))
-  expect(screen.getByRole('heading', { name: 'Pick your companion' })).toBeInTheDocument()
   await user.click(screen.getByRole('button', { name: 'Brooklyn' }))
-  expect(screen.getByRole('heading', { name: 'And you are?' })).toBeInTheDocument()
   await user.type(screen.getByLabelText('First name (optional)'), name)
   await user.click(screen.getByRole('button', { name: 'Continue to your London' }))
   expect(await screen.findByRole('heading', { name: 'Big night. Coach & you.' })).toBeInTheDocument()
   return user
+}
+
+async function reachPortal() {
+  const user = await reachStreet()
+  await user.click(screen.getByRole('button', { name: 'Enter Coach' }))
+  return { user, portal: await screen.findByLabelText('Find Your Courage portal') }
+}
+
+function deferred<T>() {
+  let resolve!: (value: T) => void
+  let reject!: (error: Error) => void
+  const promise = new Promise<T>((res, rej) => { resolve = res; reject = rej })
+  return { promise, resolve, reject }
+}
+
+const streetHandle = {
+  move: mocks.move,
+  strafe: mocks.strafe,
+  look: mocks.look,
+  steer: mocks.steer,
+  close: mocks.close,
 }
 
 describe('Smooth demo', () => {
@@ -137,33 +172,23 @@ describe('Smooth demo', () => {
 })
 
 describe('Play', () => {
+  afterEach(() => vi.useRealTimers())
+
   beforeEach(() => {
-    vi.clearAllMocks()
+    vi.resetAllMocks()
     localStorage.clear()
     mocks.createSession.mockResolvedValue({ id: 'session-1' })
-    mocks.reactorToken.mockResolvedValue({ jwt: 'jwt-1' })
+    mocks.getImmersiveWorld.mockResolvedValue({ world_id: null })
+    mocks.reactorToken
+      .mockResolvedValueOnce({ jwt: 'street-jwt' })
+      .mockResolvedValue({ jwt: 'immersive-jwt' })
     mocks.sendAnswers.mockResolvedValue(session)
     mocks.sendEvent.mockResolvedValue({ ok: true })
-    mocks.startFilm.mockResolvedValue({ film_status: 'pending' })
-    mocks.getSession.mockResolvedValue({ ...session, film_status: 'pending' })
-    mocks.openWorld.mockResolvedValue({
-      move: mocks.move,
-      strafe: mocks.strafe,
-      look: mocks.look,
-      steer: mocks.steer,
-      close: mocks.close,
-    })
+    mocks.openWorld.mockResolvedValue(streetHandle)
     mocks.close.mockResolvedValue(undefined)
-    mocks.requestPermission.mockResolvedValue('granted')
-    Object.defineProperty(window, 'DeviceOrientationEvent', {
-      configurable: true,
-      value: class extends Event {
-        static requestPermission = mocks.requestPermission
-      },
-    })
   })
 
-  it('uses the exact configured Coach black on branded stage surfaces', async () => {
+  it('uses the exact configured Coach black on branded entry and question surfaces', async () => {
     const user = userEvent.setup()
     render(<Play />)
 
@@ -173,22 +198,9 @@ describe('Play', () => {
     expect(screen.getByRole('main')).toHaveStyle({ backgroundColor: COACH.black })
   })
 
-  it('starts the session and token prefetch from the entry gesture', async () => {
-    const user = userEvent.setup()
+  it('keeps the questions and street, then shuts down LingBot alongside the muted portal', async () => {
     render(<Play />)
-
-    await user.click(screen.getByRole('button', { name: "Tap to enter Coach's London" }))
-
-    expect(mocks.requestPermission).toHaveBeenCalledOnce()
-    expect(mocks.createSession).toHaveBeenCalledOnce()
-    expect(mocks.reactorToken).toHaveBeenCalledOnce()
-    expect(await screen.findByRole('heading', { name: "Where's your London?" })).toBeInTheDocument()
-  })
-
-  it('asks neighbourhood, chapter, bag, and optional name in order before submitting answers', async () => {
-    render(<Play />)
-
-    await reachStreet()
+    const { portal } = await reachPortal()
 
     expect(mocks.sendAnswers).toHaveBeenCalledWith({
       id: 'session-1',
@@ -198,18 +210,93 @@ describe('Play', () => {
       bag: 'brooklyn',
     })
     expect(mocks.sendEvent).toHaveBeenCalledWith('session-1', 'street_enter')
-    await waitFor(() => expect(mocks.openWorld).toHaveBeenCalledOnce())
+    expect(mocks.close).toHaveBeenCalledOnce()
+    expect(portal).toHaveAttribute('src', '/immersive/portal.mp4')
+    expect(portal).toHaveAttribute('controls')
+    expect(portal).toHaveAttribute('autoplay')
+    expect((portal as HTMLVideoElement).muted).toBe(true)
+    expect(mocks.reactorToken).toHaveBeenCalledTimes(2)
   })
 
-  it('uses the branded still and parallax street when the Reactor kill switch is set', async () => {
-    localStorage.setItem('coach_no_reactor', '1')
+  it.each([false, true])('shows the portal during a pending open and waits for one close (StrictMode: %s)', async (strict) => {
+    const opening = deferred<typeof streetHandle>()
+    const closing = deferred<void>()
+    mocks.openWorld.mockReturnValue(opening.promise)
+    mocks.close.mockReturnValue(closing.promise)
+    const { unmount } = render(strict ? <StrictMode><Play /></StrictMode> : <Play />)
+    const { portal } = await reachPortal()
+
+    expect(mocks.openWorld).toHaveBeenCalledOnce()
+    expect(mocks.close).not.toHaveBeenCalled()
+    expect(mocks.reactorToken).toHaveBeenCalledTimes(strict ? 3 : 2)
+    fireEvent.ended(portal)
+    expect(screen.queryByTestId('immersive-world')).not.toBeInTheDocument()
+
+    await act(async () => opening.resolve(streetHandle))
+    expect(mocks.close).toHaveBeenCalledOnce()
+    expect(screen.getByLabelText('Find Your Courage portal')).toBe(portal)
+    expect(screen.queryByTestId('immersive-world')).not.toBeInTheDocument()
+
+    await act(async () => closing.resolve())
+    expect(screen.getByTestId('immersive-world')).toHaveAttribute('data-jwt', 'immersive-jwt')
+    unmount()
+    expect(mocks.close).toHaveBeenCalledOnce()
+  })
+
+  it.each(['open', 'close', 'token'] as const)('offers exact products after a pending %s times out without bypassing cleanup on retry', async (pending) => {
+    const opening = deferred<typeof streetHandle>()
+    const closing = deferred<void>()
+    const token = deferred<{ jwt: string }>()
+    if (pending === 'open') mocks.openWorld.mockReturnValue(opening.promise)
+    if (pending === 'close') mocks.close.mockReturnValue(closing.promise)
     render(<Play />)
-
     await reachStreet()
+    if (pending === 'token') mocks.reactorToken.mockReturnValue(token.promise)
+    vi.useFakeTimers()
+    fireEvent.click(screen.getByRole('button', { name: 'Enter Coach' }))
+    const portal = screen.getByLabelText('Find Your Courage portal')
+    fireEvent.ended(portal)
+    await act(async () => { await vi.advanceTimersByTimeAsync(7_999) })
+    expect(screen.queryByTestId('immersive-world')).not.toBeInTheDocument()
+    await act(async () => { await vi.advanceTimersByTimeAsync(1) })
 
-    expect(screen.getByTestId('street-fallback')).toHaveTextContent('Exploring Soho')
-    expect(screen.getByText('Still mode')).toBeInTheDocument()
-    expect(mocks.openWorld).not.toHaveBeenCalled()
+    expect(screen.getByTestId('immersive-world')).toHaveAttribute('data-jwt', 'fallback')
+    fireEvent.click(screen.getByRole('button', { name: 'Explore Tabby' }))
+    expect(screen.getByRole('dialog')).toBeInTheDocument()
+    fireEvent.click(screen.getByRole('button', { name: 'Close product view' }))
+    if (pending !== 'token') {
+      await act(async () => fireEvent.click(screen.getByRole('button', { name: 'Retry live garden' })))
+      expect(mocks.retryResult).toHaveBeenLastCalledWith(null)
+      expect(mocks.reactorToken).toHaveBeenCalledTimes(2)
+    }
+    await act(async () => {
+      opening.resolve(streetHandle)
+      closing.resolve()
+      token.resolve({ jwt: 'late-jwt' })
+    })
+    expect(screen.getByTestId('immersive-world')).toHaveAttribute('data-jwt', 'fallback')
+    expect(mocks.close).toHaveBeenCalledOnce()
+    mocks.reactorToken.mockResolvedValue({ jwt: 'retry-jwt' })
+    await act(async () => fireEvent.click(screen.getByRole('button', { name: 'Retry live garden' })))
+    expect(mocks.retryResult).toHaveBeenLastCalledWith('retry-jwt')
+    fireEvent.click(screen.getByRole('button', { name: 'Explore Tabby' }))
+    expect(screen.getByRole('dialog')).toBeInTheDocument()
+  })
+
+  it('requests tilt permission from the entry gesture without requesting camera access', async () => {
+    const requestPermission = vi.fn().mockResolvedValue('granted')
+    const getUserMedia = vi.fn().mockRejectedValue(new Error('Camera access is not part of this journey'))
+    vi.stubGlobal('DeviceOrientationEvent', { requestPermission })
+    vi.stubGlobal('navigator', Object.assign(Object.create(navigator), { mediaDevices: { getUserMedia } }))
+    try {
+      render(<Play />)
+      fireEvent.click(screen.getByRole('button', { name: "Tap to enter Coach's London" }))
+      expect(requestPermission).toHaveBeenCalledOnce()
+      expect(await screen.findByRole('button', { name: 'Soho' })).toBeInTheDocument()
+      expect(getUserMedia).not.toHaveBeenCalled()
+    } finally {
+      vi.unstubAllGlobals()
+    }
   })
 
   it('turns immediately and stops on neutral without replaying a stale tilt', async () => {
@@ -303,19 +390,114 @@ describe('Play', () => {
     }
   })
 
-  it('enters the explicit mirror stage from the street', async () => {
-    localStorage.setItem('coach_no_reactor', '1')
+  it.each(['open', 'close'] as const)('keeps live entry and retry blocked when %s cleanup fails', async (failure) => {
+    if (failure === 'open') mocks.openWorld.mockRejectedValue(new WorldCleanupError('disconnect failed'))
+    else mocks.close.mockRejectedValue(new Error('disconnect failed'))
     render(<Play />)
     const user = await reachStreet()
-
+    if (failure === 'open') {
+      await user.click(await screen.findByRole('button', { name: 'Retry live street' }))
+      expect(mocks.openWorld).toHaveBeenCalledOnce()
+    }
     await user.click(screen.getByRole('button', { name: 'Enter Coach' }))
+    fireEvent.ended(await screen.findByLabelText('Find Your Courage portal'))
+    expect(await screen.findByTestId('immersive-world')).toHaveAttribute('data-jwt', 'fallback')
+    await user.click(screen.getByRole('button', { name: 'Retry live garden' }))
+    expect(mocks.retryResult).toHaveBeenLastCalledWith(null)
+    expect(mocks.reactorToken).toHaveBeenCalledTimes(2)
+    expect(mocks.openWorld).toHaveBeenCalledOnce()
+    expect(mocks.close).toHaveBeenCalledTimes(failure === 'open' ? 0 : 1)
+  })
 
-    expect(mocks.sendEvent).toHaveBeenCalledWith('session-1', 'store_enter')
-    expect(screen.getByTestId('mirror-stage')).toBeInTheDocument()
+  it('closes a late street instance once after unmount without advancing the portal', async () => {
+    const opening = deferred<typeof streetHandle>()
+    mocks.openWorld.mockReturnValue(opening.promise)
+    const { unmount } = render(<Play />)
+    const { portal } = await reachPortal()
+    fireEvent.ended(portal)
+    unmount()
+    await act(async () => opening.resolve(streetHandle))
+    expect(mocks.close).toHaveBeenCalledOnce()
+    expect(mocks.sendEvent.mock.calls.filter(([, type]) => type === 'immersive_enter')).toHaveLength(0)
+  })
 
-    await user.click(screen.getByRole('button', { name: 'Step in front of the mirror' }))
-    await user.click(screen.getByRole('button', { name: 'Continue to your chapter' }))
-    expect(screen.getByTestId('film-stage')).toBeInTheDocument()
+  it('closes a pending street open once when unmounted without entering the store', async () => {
+    const opening = deferred<typeof streetHandle>()
+    mocks.openWorld.mockReturnValue(opening.promise)
+    const { unmount } = render(<Play />)
+    await reachStreet()
+    expect(mocks.openWorld).toHaveBeenCalledOnce()
+    unmount()
+    await act(async () => opening.resolve(streetHandle))
+    expect(mocks.close).toHaveBeenCalledOnce()
+    expect(mocks.reactorToken).toHaveBeenCalledOnce()
+    expect(mocks.sendEvent.mock.calls.filter(([, type]) => type === 'store_enter')).toHaveLength(0)
+  })
+
+  it('does not open a late-token street after the portal is already mounted', async () => {
+    const token = deferred<{ jwt: string }>()
+    mocks.reactorToken.mockReset()
+    mocks.reactorToken.mockReturnValueOnce(token.promise).mockResolvedValue({ jwt: 'immersive-jwt' })
+    render(<Play />)
+    const { portal } = await reachPortal()
+    expect(mocks.openWorld).not.toHaveBeenCalled()
+    await act(async () => token.resolve({ jwt: 'late-street-jwt' }))
+    fireEvent.ended(portal)
+    expect(await screen.findByTestId('immersive-world')).toHaveAttribute('data-jwt', 'immersive-jwt')
+    expect(mocks.openWorld).not.toHaveBeenCalled()
+    expect(mocks.close).not.toHaveBeenCalled()
+    expect(mocks.reactorToken).toHaveBeenCalledTimes(2)
+  })
+
+  it('allows a street retry after an opening error whose cleanup succeeded', async () => {
+    mocks.openWorld.mockRejectedValueOnce(new Error('connect failed'))
+    render(<Play />)
+    const user = await reachStreet()
+    await user.click(await screen.findByRole('button', { name: 'Retry live street' }))
+    await waitFor(() => expect(mocks.openWorld).toHaveBeenCalledTimes(2))
+    await user.click(screen.getByRole('button', { name: 'Enter Coach' }))
+    fireEvent.ended(await screen.findByLabelText('Find Your Courage portal'))
+    expect(await screen.findByTestId('immersive-world')).toHaveAttribute('data-jwt', 'immersive-jwt')
+    expect(mocks.close).toHaveBeenCalledOnce()
+  })
+
+  it('enters the immersive world from the exact portal and completes with the selected bag', async () => {
+    render(<Play />)
+    const { user, portal } = await reachPortal()
+
+    await waitFor(() => expect(mocks.reactorToken).toHaveBeenCalledTimes(2))
+    fireEvent.ended(portal)
+
+    const world = await screen.findByTestId('immersive-world')
+    expect(world).toHaveAttribute('data-jwt', 'immersive-jwt')
+    expect(mocks.sendEvent.mock.calls.filter(([, type]) => type === 'immersive_enter')).toHaveLength(1)
+
+    await user.click(screen.getByRole('button', { name: 'Explore Brooklyn' }))
+    expect(screen.getByRole('dialog')).toBeInTheDocument()
+    expect(screen.getByRole('heading', { name: 'Brooklyn' })).toBeInTheDocument()
+    expect(screen.getByTestId('immersive-world')).toBeInTheDocument()
+    expect(mocks.sendEvent).toHaveBeenCalledWith('session-1', 'product_view', 'brooklyn')
+
+    await user.click(screen.getByRole('button', { name: 'Choose Brooklyn' }))
+    expect(screen.getByRole('heading', { name: 'Carry your courage.' })).toBeInTheDocument()
+    expect(screen.getByText('Maya chose the Coach Brooklyn.')).toBeInTheDocument()
+    expect(mocks.sendEvent).toHaveBeenCalledWith('session-1', 'product_select', 'brooklyn')
+    expect(mocks.sendEvent).toHaveBeenCalledWith('session-1', 'world_time', expect.any(Number))
+    expect(mocks.uploadSelfie).not.toHaveBeenCalled()
+    expect(mocks.startFilm).not.toHaveBeenCalled()
+  })
+
+  it('returns from the inspector to the same live world', async () => {
+    render(<Play />)
+    const { user, portal } = await reachPortal()
+    fireEvent.ended(portal)
+    const world = await screen.findByTestId('immersive-world')
+
+    await user.click(screen.getByRole('button', { name: 'Explore Tabby' }))
+    await user.click(screen.getByRole('button', { name: 'Close product view' }))
+
+    expect(screen.queryByRole('dialog')).not.toBeInTheDocument()
+    expect(screen.getByTestId('immersive-world')).toBe(world)
   })
 
   it('emits one drop when a started experience is hidden and removes the listener on unmount', async () => {
@@ -331,152 +513,5 @@ describe('Play', () => {
     unmount()
     document.dispatchEvent(new Event('visibilitychange'))
     expect(mocks.sendEvent.mock.calls.filter(([, type]) => type === 'drop')).toHaveLength(1)
-  })
-})
-
-describe('FilmStage', () => {
-  beforeEach(() => {
-    vi.clearAllMocks()
-    mocks.sendEvent.mockResolvedValue({ ok: true })
-    mocks.startFilm.mockResolvedValue({ film_status: 'pending' })
-    mocks.getSession.mockResolvedValue({ ...session, film_status: 'pending' })
-  })
-
-  afterEach(() => {
-    vi.useRealTimers()
-    vi.unstubAllGlobals()
-    vi.restoreAllMocks()
-    Reflect.deleteProperty(window.navigator, 'share')
-  })
-
-  it('offers exactly three chapter-safe lines with the configured default selected first', () => {
-    render(<FilmStage session={session} />)
-
-    const choices = screen.getAllByRole('button', { name: /^Choose line:/ })
-    expect(choices).toHaveLength(3)
-    expect(choices[0]).toHaveTextContent("Tonight I'm not asking permission.")
-    expect(choices[0]).toHaveAttribute('aria-pressed', 'true')
-  })
-
-  it('accepts a custom line and sends it before requesting the film', async () => {
-    const user = userEvent.setup()
-    render(<FilmStage session={session} />)
-
-    await user.click(screen.getByRole('button', { name: 'Write your own line' }))
-    await user.type(screen.getByLabelText('Your chapter line'), 'London, meet the real me.')
-    await user.click(screen.getByRole('button', { name: 'Make my film' }))
-
-    expect(mocks.sendEvent).toHaveBeenCalledWith('session-1', 'line', 'London, meet the real me.')
-    expect(mocks.startFilm).toHaveBeenCalledWith('session-1')
-    expect(mocks.sendEvent.mock.invocationCallOrder[0]).toBeLessThan(mocks.startFilm.mock.invocationCallOrder[0])
-    expect(screen.getByText('Cutting your chapter…')).toBeInTheDocument()
-  })
-
-  it('polls every two seconds until the returned film is ready and plays that URL', async () => {
-    vi.useFakeTimers()
-    mocks.getSession.mockResolvedValueOnce({ ...session, film_status: 'ready', film_url: '/api/files/films/session-1.mp4' })
-    render(<FilmStage session={session} />)
-
-    fireEvent.click(screen.getAllByRole('button', { name: /^Choose line:/ })[1])
-    fireEvent.click(screen.getByRole('button', { name: 'Make my film' }))
-    await act(async () => undefined)
-    expect(mocks.sendEvent).toHaveBeenCalledWith('session-1', 'line', 'The night starts when I arrive.')
-    expect(screen.getByText('Cutting your chapter…')).toBeInTheDocument()
-
-    await act(async () => {
-      await vi.advanceTimersByTimeAsync(2_000)
-    })
-
-    expect(mocks.getSession).toHaveBeenCalledWith('session-1')
-    expect(screen.getByTestId('chapter-film')).toHaveAttribute('src', '/api/files/films/session-1.mp4')
-  })
-
-  it('autoplays the phone film muted and restarts it with sound in the hear gesture', async () => {
-    const play = vi.spyOn(HTMLMediaElement.prototype, 'play').mockResolvedValue(undefined)
-    const user = userEvent.setup()
-    render(<FilmStage session={{ ...session, film_status: 'ready', film_url: '/chapter.mp4' }} />)
-
-    const film = screen.getByTestId('chapter-film') as HTMLVideoElement
-    expect(film).toHaveProperty('autoplay', true)
-    expect(film).toHaveProperty('muted', true)
-    const hear = screen.getByRole('button', { name: 'Hear my chapter' })
-    expect(hear).toHaveClass('min-h-14')
-
-    film.currentTime = 5
-    await user.click(hear)
-
-    expect(film.currentTime).toBe(0)
-    expect(film.muted).toBe(false)
-    expect(play).toHaveBeenCalledOnce()
-  })
-
-  it('cleans up the pending poll when the film stage unmounts', async () => {
-    vi.useFakeTimers()
-    const { unmount } = render(<FilmStage session={{ ...session, film_status: 'pending' }} />)
-
-    unmount()
-    await vi.advanceTimersByTimeAsync(2_000)
-
-    expect(mocks.getSession).not.toHaveBeenCalled()
-  })
-
-  it('stops a failed film from hanging and offers a graceful retry', async () => {
-    vi.useFakeTimers()
-    mocks.getSession.mockResolvedValueOnce({ ...session, film_status: 'failed', film_url: null })
-    render(<FilmStage session={session} />)
-
-    fireEvent.click(screen.getByRole('button', { name: 'Make my film' }))
-    await act(async () => undefined)
-    await act(async () => {
-      await vi.advanceTimersByTimeAsync(2_000)
-    })
-
-    expect(screen.getByRole('alert')).toHaveTextContent("Your film couldn't be cut just yet")
-    expect(screen.getByRole('button', { name: 'Try again' })).toBeInTheDocument()
-  })
-
-  it('copies the film URL when Web Share is unavailable and records the share', async () => {
-    const user = userEvent.setup()
-    const writeText = vi.fn().mockResolvedValue(undefined)
-    Object.defineProperty(window.navigator, 'share', { configurable: true, value: undefined })
-    Object.defineProperty(window.navigator, 'clipboard', { configurable: true, value: { writeText } })
-    render(<FilmStage session={{ ...session, film_status: 'ready', film_url: 'https://coach.test/maya.mp4' }} />)
-
-    await user.click(screen.getByRole('button', { name: 'Share your chapter' }))
-
-    expect(await screen.findByText('Film link copied.')).toBeInTheDocument()
-    expect(writeText).toHaveBeenCalledWith('https://coach.test/maya.mp4')
-    expect(mocks.sendEvent).toHaveBeenCalledWith('session-1', 'share')
-  })
-
-  it('uses Web Share with the returned film URL when supported', async () => {
-    const user = userEvent.setup()
-    const share = vi.fn().mockResolvedValue(undefined)
-    Object.defineProperty(window.navigator, 'share', { configurable: true, value: share })
-    render(<FilmStage session={{ ...session, film_status: 'ready', film_url: 'https://coach.test/maya.mp4' }} />)
-
-    await user.click(screen.getByRole('button', { name: 'Share your chapter' }))
-
-    expect(await screen.findByText('Chapter shared.')).toBeInTheDocument()
-    expect(share).toHaveBeenCalledWith(expect.objectContaining({ url: 'https://coach.test/maya.mp4' }))
-    expect(mocks.sendEvent).toHaveBeenCalledWith('session-1', 'share')
-  })
-
-  it('emits exact CTA values and replaces the actions with branded confirmation', async () => {
-    const user = userEvent.setup()
-    const readySession = { ...session, film_status: 'ready' as const, film_url: 'https://coach.test/maya.mp4' }
-    const { unmount } = render(<FilmStage session={readySession} />)
-
-    await user.click(screen.getByRole('button', { name: 'Reserve the Brooklyn at Coach Regent Street' }))
-
-    expect(mocks.sendEvent).toHaveBeenCalledWith('session-1', 'cta', 'reserve')
-    expect(screen.getByRole('heading', { name: 'See you on Regent Street.' })).toBeInTheDocument()
-    expect(screen.getByText(/Maya's next chapter/)).toBeInTheDocument()
-
-    unmount()
-    render(<FilmStage session={readySession} />)
-    await user.click(screen.getByRole('button', { name: 'Send to a friend' }))
-    expect(mocks.sendEvent).toHaveBeenCalledWith('session-1', 'cta', 'send')
-    expect(screen.getByRole('heading', { name: 'Your chapter is ready to travel.' })).toBeInTheDocument()
   })
 })

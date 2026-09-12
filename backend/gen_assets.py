@@ -13,9 +13,10 @@ import pathlib
 
 import prompts
 import reactor_utils
+import reactor_sdk
 
 OUT = pathlib.Path(__file__).resolve().parent.parent / "frontend" / "public"
-CONCURRENCY = 4
+CONCURRENCY = int(os.environ.get("GEN_CONCURRENCY", 2))
 
 
 async def gen(prompt: str, path: pathlib.Path, sem: asyncio.Semaphore) -> None:
@@ -23,7 +24,16 @@ async def gen(prompt: str, path: pathlib.Path, sem: asyncio.Semaphore) -> None:
         print(f"skip {path.name}")
         return
     async with sem:
-        frame = await reactor_utils.grab_still(prompt, os.environ["REACTOR_API_KEY"])
+        for attempt in range(1, 9):
+            try:
+                frame = await reactor_utils.grab_still(prompt, os.environ["REACTOR_API_KEY"])
+                break
+            except (reactor_sdk.errors.RateLimitedError, Exception) as e:
+                print(f"{path.name} attempt {attempt}: {e}")
+                if attempt == 8:
+                    print(f"FAILED {path.name}")
+                    return
+                await asyncio.sleep(min(10 * 2 ** (attempt - 1), 60))
         reactor_utils.save_still(frame, path, aspect="9:16")
         print(f"wrote {path}")
 

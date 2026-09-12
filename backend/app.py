@@ -20,7 +20,7 @@ import secrets as pysecrets
 import time
 
 import modal
-from fastapi import FastAPI, File, Form, Request, UploadFile
+from fastapi import FastAPI, File, Form, HTTPException, Request, UploadFile
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import FileResponse
 
@@ -71,6 +71,10 @@ def new_session() -> dict:
         "cta": None,
         "walk_ms": 0,
         "store_ms": 0,
+        "immersive_entered": False,
+        "viewed_products": [],
+        "selected_product": None,
+        "world_ms": 0,
         "created_at": int(time.time()),
     }
 
@@ -100,11 +104,30 @@ def create_session():
     return {"id": s["id"]}
 
 
+@web.get("/api/immersive-world")
+def immersive_world():
+    world_id = state.get("immersive_world_id")
+    return {"world_id": world_id if isinstance(world_id, str) else None}
+
+
+@web.post("/api/immersive-world")
+def save_immersive_world(body: dict):
+    raw_world_id = body.get("world_id")
+    if not isinstance(raw_world_id, str) or not raw_world_id.strip():
+        raise HTTPException(422, "world_id must be a non-empty string")
+    world_id = raw_world_id.strip()
+    existing = state.get("immersive_world_id")
+    if not isinstance(existing, str) or not existing:
+        state["immersive_world_id"] = world_id
+        existing = world_id
+    return {"world_id": existing}
+
+
 @web.post("/api/answers")
 def answers(body: dict):
     s = get_session(body["id"])
     if s is None:
-        return {"error": "unknown session"}, 404
+        raise HTTPException(404, "unknown session")
     s["name"] = body.get("name", "")
     s["neighbourhood"] = body["neighbourhood"]
     s["chapter"] = body["chapter"]
@@ -123,7 +146,7 @@ def answers(body: dict):
 def event(body: dict):
     s = get_session(body["id"])
     if s is None:
-        return {"error": "unknown session"}, 404
+        raise HTTPException(404, "unknown session")
     t, v = body["type"], body.get("value")
     if t == "street_enter":
         s["step"] = "street"
@@ -148,6 +171,29 @@ def event(body: dict):
         s["step"] = "done"
     elif t == "drop":
         s["step"] = "done"
+    elif t == "immersive_enter":
+        s["immersive_entered"] = True
+    elif t == "product_view":
+        if v not in ("tabby", "brooklyn"):
+            raise HTTPException(422, "invalid product")
+        viewed_products = s.get("viewed_products") or []
+        if v not in viewed_products:
+            viewed_products.append(v)
+        s["viewed_products"] = viewed_products
+    elif t == "product_select":
+        if v not in ("tabby", "brooklyn"):
+            raise HTTPException(422, "invalid product")
+        s["selected_product"] = v
+    elif t == "world_time":
+        if isinstance(v, bool):
+            raise HTTPException(422, "world_time must be a non-negative integer")
+        try:
+            world_ms = int(v)
+        except (TypeError, ValueError, OverflowError):
+            raise HTTPException(422, "world_time must be a non-negative integer") from None
+        if world_ms < 0 or world_ms != v:
+            raise HTTPException(422, "world_time must be a non-negative integer")
+        s["world_ms"] = (s.get("world_ms") or 0) + world_ms
     save_session(s)
     return {"ok": True}
 
@@ -156,7 +202,7 @@ def event(body: dict):
 async def selfie(request: Request, id: str = Form(...), file: UploadFile = File(...)):
     s = get_session(id)
     if s is None:
-        return {"error": "unknown session"}, 404
+        raise HTTPException(404, "unknown session")
     data = await file.read()
     path = pathlib.Path(FILES) / "selfies" / f"{id}.jpg"
     path.parent.mkdir(parents=True, exist_ok=True)
@@ -170,15 +216,16 @@ async def selfie(request: Request, id: str = Form(...), file: UploadFile = File(
 
 @web.get("/api/files/{path:path}")
 def get_file(path: str):
-    p = (pathlib.Path(FILES) / path).resolve()
-    if not str(p).startswith(FILES + "/"):
-        return {"error": "not found"}, 404
+    root = pathlib.Path(FILES).resolve()
+    p = (root / path).resolve()
+    if not p.is_relative_to(root):
+        raise HTTPException(404, "not found")
     try:
         files_vol.reload()
     except Exception:
         pass
     if not p.is_file():
-        return {"error": "not found"}, 404
+        raise HTTPException(404, "not found")
     return FileResponse(p)
 
 
@@ -186,7 +233,7 @@ def get_file(path: str):
 def film(request: Request, body: dict):
     s = get_session(body["id"])
     if s is None:
-        return {"error": "unknown session"}, 404
+        raise HTTPException(404, "unknown session")
     s["film_status"] = "pending"
     s["step"] = "film"
     s["_origin"] = str(request.base_url)
@@ -212,7 +259,7 @@ def reactor_token():
 def read_session(sid: str):
     s = get_session(sid)
     if s is None:
-        return {"error": "unknown session"}, 404
+        raise HTTPException(404, "unknown session")
     return s
 
 
@@ -228,6 +275,11 @@ def get_state():
         "films": sum(1 for s in sessions if s["film_status"] == "ready"),
         "shares": sum(1 for s in sessions if s["shared"]),
         "reservations": sum(1 for s in sessions if s["cta"] == "reserve"),
+        "world_entries": sum(1 for s in sessions if s.get("immersive_entered", False)),
+        "product_views": sum(len(s.get("viewed_products") or []) for s in sessions),
+        "product_selections": sum(
+            1 for s in sessions if s.get("selected_product") is not None
+        ),
     }
     return {"sessions": sessions, "counts": counts}
 
@@ -281,6 +333,13 @@ def seed(body: dict | None = None):
         s["film_url"] = SAMPLE_FILM_URL or None
         s["shared"] = random.random() < 0.3
         s["cta"] = random.choice([None, "reserve", "send"])
+        s["immersive_entered"] = random.random() < 0.7
+        if s["immersive_entered"]:
+            s["viewed_products"] = random.sample(
+                ["tabby", "brooklyn"], random.randint(0, 2)
+            )
+            s["selected_product"] = random.choice([None, *s["viewed_products"]])
+            s["world_ms"] = random.randint(5_000, 120_000)
         save_session(s)
         state["sessions"] = state.get("sessions", []) + [s["id"]]
     return {"ok": True, "n": n}

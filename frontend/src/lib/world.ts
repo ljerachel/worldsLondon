@@ -17,6 +17,8 @@ export interface WorldHandle {
   close: () => Promise<void>
 }
 
+export class WorldCleanupError extends Error {}
+
 export async function openWorld(opts: {
   jwt: string
   anchorUrl: string
@@ -60,7 +62,9 @@ export async function openWorld(opts: {
   } catch (error) {
     try {
       await reactor.disconnect()
-    } catch {}
+    } catch {
+      throw new WorldCleanupError('Street cleanup could not be confirmed', { cause: error })
+    }
     throw error
   }
 

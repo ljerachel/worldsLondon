@@ -1,29 +1,16 @@
 import { useCallback, useEffect, useRef, useState } from 'react'
-import Mirror from '../components/Mirror'
+import ImmersiveWorld from '../components/ImmersiveWorld'
+import ProductInspector from '../components/ProductInspector'
 import { BAGS, CHAPTERS, COACH, NEIGHBOURHOODS } from '../data/config'
 import type { BagKey, ChapterKey, NeighbourhoodKey } from '../data/config'
+import { PORTAL_VIDEO_URL, PRODUCTS } from '../data/products'
+import type { ProductKey } from '../data/products'
 import { api } from '../lib/api'
-import type { Session } from '../lib/api'
-import { openWorld } from '../lib/world'
+import type { ImmersiveWorldRecord, Session } from '../lib/api'
+import { openWorld, WorldCleanupError } from '../lib/world'
 import type { WorldHandle } from '../lib/world'
 
-// TODO (Builder A — tickets T5/T7 in the build spec):
-// Screen 1: "Tap to enter Coach's London" -> POST /api/session, gyro permission, prefetch Reactor JWT
-// Screen 2: 3 questions (neighbourhood / chapter / bag) + optional name -> POST /api/answers
-// Screen 3: street via openWorld() (lib/world.ts); tilt-look, hold-to-walk, "Enter Coach" chip
-// Screen 4: <Mirror /> (Builder C) — X2 try-on
-// Screen 5: "Your chapter" — pick line -> POST /api/film -> poll session -> play film_url; share + CTA
-export type PlayStage = 'enter' | 'questions' | 'street' | 'mirror' | 'film'
-
-export interface MirrorStageProps {
-  session: Session
-  jwt: string | null
-  onComplete: () => void
-}
-
-export interface FilmStageProps {
-  session: Session
-}
+export type PlayStage = 'enter' | 'questions' | 'street' | 'portal' | 'immersive' | 'product' | 'complete'
 
 type QuestionStep = 'neighbourhood' | 'chapter' | 'bag' | 'name'
 
@@ -241,11 +228,13 @@ function Street({
   session: Session
   jwt: string | null
   tokenSettled: boolean
-  onEnterStore: () => void
+  onEnterStore: (shutdown: Promise<boolean>) => void
   onRetryToken: () => void
 }) {
   const videoRef = useRef<HTMLVideoElement>(null)
   const worldRef = useRef<WorldHandle | null>(null)
+  const shutdownRef = useRef<() => Promise<boolean>>(() => Promise.resolve(true))
+  const enteringStoreRef = useRef(false)
   const lookRef = useRef<'left' | 'right' | 'idle'>('idle')
   const neutralTiltRef = useRef<number | null>(null)
   const fallbackRef = useRef<HTMLDivElement>(null)
@@ -259,6 +248,7 @@ function Street({
   const [enterReady, setEnterReady] = useState(false)
   const [retry, setRetry] = useState(0)
   const [typedLength, setTypedLength] = useState(0)
+  const [enteringStore, setEnteringStore] = useState(false)
   const neighbourhoodLabel = NEIGHBOURHOODS[session.neighbourhood as NeighbourhoodKey]?.label ?? session.neighbourhood
   const chapterLabel = CHAPTERS[session.chapter as ChapterKey]?.label ?? session.chapter
   const campaignLine = `${chapterLabel}. Coach & you.`
@@ -286,17 +276,22 @@ function Street({
 
   useEffect(() => {
     let cancelled = false
-    let fallbackTimer = 0
     let steerTimer = 0
+    let world: WorldHandle | null = null
+    let cleanupSafe = true
+    let shutdownPromise: Promise<boolean> | null = null
+    const previousShutdown = shutdownRef.current()
 
-    if (reactorDisabled || !jwt) return
+    if (reactorDisabled || !jwt || enteringStoreRef.current) return
 
-    fallbackTimer = window.setTimeout(() => setFallback(true), 8_000)
+    const fallbackTimer = window.setTimeout(() => setFallback(true), 8_000)
 
     const connect = async () => {
       try {
-        if (!videoRef.current) return
-        const world = await openWorld({
+        cleanupSafe = await previousShutdown
+        if (!cleanupSafe) throw new WorldCleanupError('Street cleanup is unresolved')
+        if (cancelled || !videoRef.current) return
+        world = await openWorld({
           jwt,
           anchorUrl: session.anchor_url,
           prompt: session.street_prompt,
@@ -311,17 +306,15 @@ function Street({
             if (!cancelled) setLatency(Math.round(ms))
           },
         })
-        if (cancelled) {
-          await world.close()
-          return
-        }
+        if (cancelled) return
         worldRef.current = world
         world.look(lookRef.current)
         if (walkStartedRef.current !== null) world.move('forward')
         steerTimer = window.setInterval(() => {
-          world.steer(`${session.street_prompt}, the Coach store glowing ahead, closer`)
+          world?.steer(`${session.street_prompt}, the Coach store glowing ahead, closer`)
         }, 8_000)
       } catch (error) {
+        if (error instanceof WorldCleanupError) cleanupSafe = false
         if (!cancelled) {
           const failure = error as { status?: number; code?: string } | null
           setFallback(true)
@@ -331,16 +324,27 @@ function Street({
         }
       }
     }
-    void connect()
-
-    return () => {
+    const opening = connect()
+    const shutdown = () => {
       cancelled = true
       window.clearTimeout(fallbackTimer)
       window.clearInterval(steerTimer)
-      const world = worldRef.current
-      worldRef.current = null
-      if (world) void world.close()
+      if (worldRef.current === world) worldRef.current = null
+      shutdownPromise ??= opening.then(async () => {
+        if (world) {
+          try {
+            await world.close()
+          } catch {
+            return false
+          }
+        }
+        return cleanupSafe
+      })
+      return shutdownPromise
     }
+    shutdownRef.current = shutdown
+
+    return () => { void shutdown() }
   }, [jwt, reactorDisabled, retry, session.anchor_url, session.street_prompt, tokenSettled])
 
   const recenterTilt = useCallback(() => {
@@ -404,6 +408,14 @@ function Street({
     if (walkStartedRef.current !== null) return
     walkStartedRef.current = performance.now()
     worldRef.current?.move('forward')
+  }
+
+  const enterStore = () => {
+    if (enteringStoreRef.current) return
+    enteringStoreRef.current = true
+    setEnteringStore(true)
+    stopWalking()
+    onEnterStore(shutdownRef.current())
   }
 
   const finishSwipe = (x: number) => {
@@ -494,14 +506,15 @@ function Street({
       <div className="absolute inset-x-0 bottom-0 flex flex-col items-center gap-3 px-5 pb-[max(1.25rem,env(safe-area-inset-bottom))]">
         <button
           type="button"
-          onClick={onEnterStore}
-          className={`min-h-14 rounded-full border px-7 text-sm uppercase tracking-[0.18em] backdrop-blur transition ${enterReady ? 'animate-pulse border-[#F3EBDD]' : 'border-[#B3894F]/70'}`}
+          onClick={() => void enterStore()}
+          disabled={enteringStore}
+          className={`min-h-14 rounded-full border px-7 text-sm uppercase tracking-[0.18em] backdrop-blur transition disabled:opacity-60 ${enterReady ? 'animate-pulse border-[#F3EBDD]' : 'border-[#B3894F]/70'}`}
           style={{
             backgroundColor: enterReady ? COACH.tan : `${COACH.black}73`,
             color: enterReady ? COACH.black : COACH.cream,
           }}
         >
-          Enter Coach
+          {enteringStore ? 'Closing the street…' : 'Enter Coach'}
         </button>
         <button
           type="button"
@@ -525,311 +538,107 @@ function Street({
   )
 }
 
-export function MirrorStage({ session, jwt, onComplete }: MirrorStageProps) {
+function Portal({
+  shutdown,
+  onReady,
+}: {
+  shutdown: Promise<boolean>
+  onReady: (jwt: string | null, worldPromise: Promise<ImmersiveWorldRecord>) => void
+}) {
+  const [canEnter, setCanEnter] = useState(false)
+  const [token, setToken] = useState<string | null>(null)
+  const [tokenSettled, setTokenSettled] = useState(false)
+  const enteredRef = useRef(false)
+  const mountedRef = useRef(false)
+  const tokenRequestRef = useRef<Promise<string | null>>(Promise.resolve(null))
+  const worldRequestRef = useRef<Promise<ImmersiveWorldRecord>>(
+    Promise.resolve({ world_id: null }),
+  )
+
+  useEffect(() => {
+    let cancelled = false
+    mountedRef.current = true
+    const timer = window.setTimeout(() => setCanEnter(true), 3_000)
+    let deadline = 0
+    worldRequestRef.current = api.getImmersiveWorld().catch(() => ({ world_id: null }))
+    const tokenRequest = api.reactorToken().then(({ jwt }) => jwt).catch(() => null)
+    tokenRequestRef.current = Promise.race([
+      shutdown.then(async (closed) => closed ? await tokenRequest : null).catch(() => null),
+      new Promise<null>((resolve) => {
+        deadline = window.setTimeout(() => resolve(null), 8_000)
+      }),
+    ]).then((jwt) => {
+      window.clearTimeout(deadline)
+      if (!cancelled) {
+        setToken(jwt)
+        setTokenSettled(true)
+      }
+      return jwt
+    })
+    return () => {
+      cancelled = true
+      mountedRef.current = false
+      window.clearTimeout(timer)
+      window.clearTimeout(deadline)
+    }
+  }, [shutdown])
+
+  const enterWorld = async () => {
+    if (enteredRef.current) return
+    enteredRef.current = true
+    const jwt = await tokenRequestRef.current
+    if (mountedRef.current) onReady(jwt, worldRequestRef.current)
+  }
+
   return (
-    <section
-      data-testid="mirror-stage"
-      data-session-id={session.id}
-      data-token-ready={jwt ? 'true' : 'false'}
-      className={screenClass}
-      style={screenStyle}
-    >
-      <Mirror id={session.id} jwt={jwt} bag={session.bag} onContinue={onComplete} />
-    </section>
+    <main className={screenClass} style={screenStyle}>
+      <video
+        aria-label="Find Your Courage portal"
+        src={PORTAL_VIDEO_URL}
+        autoPlay
+        muted
+        playsInline
+        controls
+        onEnded={enterWorld}
+        className="absolute inset-0 h-full w-full object-cover"
+      />
+      <div className="pointer-events-none absolute inset-0 bg-gradient-to-b from-black/45 via-transparent to-black/75" />
+      <div className="absolute inset-x-0 top-0 flex justify-center p-[max(1.25rem,env(safe-area-inset-top))]">
+        <BrandMark />
+      </div>
+      {canEnter && (
+        <div className="absolute inset-x-0 bottom-0 px-5 pb-[max(1.25rem,env(safe-area-inset-bottom))]">
+          <button
+            type="button"
+            onClick={enterWorld}
+            className="min-h-16 w-full rounded-full bg-[#F3EBDD] px-6 font-semibold uppercase tracking-[0.18em] text-[#0a0a0a] transition active:scale-[0.98]"
+          >
+            Enter the world
+          </button>
+          {tokenSettled && !token && (
+            <p role="status" className="mt-3 rounded-2xl bg-black/70 p-3 text-center text-sm backdrop-blur">
+              The live garden is resting. Exact product views will still be available.
+            </p>
+          )}
+        </div>
+      )}
+    </main>
   )
 }
 
-const CHAPTER_LINE_ALTERNATIVES: Record<ChapterKey, [string, string]> = {
-  firstday: ['A new door. I walked through it.', 'First step taken. The rest is mine.'],
-  bignight: ['The night starts when I arrive.', 'No rules tonight. Just my story.'],
-  sunday: ['Taking my time looks good on me.', 'Today can stay beautifully unplanned.'],
-  leaving: ['The next place is calling my name.', 'I packed light and kept the courage.'],
-  meeting: ['Right on time for something real.', 'Maybe this is where the story starts.'],
-}
-
-type FilmView = 'picker' | 'pending' | 'ready' | 'failed' | 'confirmation'
-
-export function FilmStage({ session }: FilmStageProps) {
-  const chapter = CHAPTERS[session.chapter as ChapterKey]
-  const defaultLine = chapter?.line ?? session.line
-  const alternatives = CHAPTER_LINE_ALTERNATIVES[session.chapter as ChapterKey] ?? [
-    'This chapter is mine to write.',
-    'London looks different from here.',
-  ]
-  const lines = [defaultLine, ...alternatives]
-  const neighbourhood = NEIGHBOURHOODS[session.neighbourhood as NeighbourhoodKey]?.label ?? session.neighbourhood
-  const bag = BAGS[session.bag as BagKey] ?? session.bag
-  const author = session.name ? `${session.name}'s` : 'Your'
-  const [view, setView] = useState<FilmView>(() => {
-    if (session.film_status === 'ready') return session.film_url ? 'ready' : 'failed'
-    if (session.film_status === 'pending') return 'pending'
-    if (session.film_status === 'failed') return 'failed'
-    return 'picker'
-  })
-  const [selectedLine, setSelectedLine] = useState<string>(defaultLine)
-  const [filmLine, setFilmLine] = useState<string>(defaultLine)
-  const [writingCustom, setWritingCustom] = useState(false)
-  const [customLine, setCustomLine] = useState('')
-  const [filmUrl, setFilmUrl] = useState(session.film_url)
-  const [feedback, setFeedback] = useState('')
-  const [completion, setCompletion] = useState<'reserve' | 'send' | null>(session.cta)
-  const [generationSeconds, setGenerationSeconds] = useState(0)
-  const filmVideoRef = useRef<HTMLVideoElement>(null)
-
-  useEffect(() => {
-    if (view !== 'pending') return
-    const ticker = window.setInterval(() => setGenerationSeconds((seconds) => seconds + 1), 1_000)
-    return () => window.clearInterval(ticker)
-  }, [view])
-
-  useEffect(() => {
-    if (view !== 'pending') return
-    let cancelled = false
-    let pollTimer = 0
-
-    const poll = async () => {
-      try {
-        const latest = await api.getSession(session.id)
-        if (cancelled) return
-        if (latest.film_status === 'ready') {
-          if (latest.film_url) {
-            setFilmUrl(latest.film_url)
-            setView('ready')
-          } else {
-            setView('failed')
-          }
-          return
-        }
-        if (latest.film_status === 'failed') {
-          setView('failed')
-          return
-        }
-      } catch {
-        if (!cancelled) setFeedback('Still connecting to the cutting room…')
-      }
-      if (!cancelled) pollTimer = window.setTimeout(() => void poll(), 2_000)
-    }
-
-    pollTimer = window.setTimeout(() => void poll(), 2_000)
-    return () => {
-      cancelled = true
-      window.clearTimeout(pollTimer)
-    }
-  }, [session.id, view])
-
-  const makeFilm = async () => {
-    const line = writingCustom ? customLine.trim() : selectedLine
-    if (!line) return
-    setFeedback('')
-    setFilmLine(line)
-    setGenerationSeconds(0)
-    setView('pending')
-    try {
-      await api.sendEvent(session.id, 'line', line)
-      const started = await api.startFilm(session.id)
-      if (started.film_status === 'failed') setView('failed')
-    } catch {
-      setView('failed')
-    }
-  }
-
-  const shareFilm = async () => {
-    if (!filmUrl) return
-    const payload = {
-      title: `&Coach · ${author} London chapter`,
-      text: `${filmLine} — &Coach`,
-      url: filmUrl,
-    }
-    try {
-      if (window.navigator.share) {
-        await window.navigator.share(payload)
-        setFeedback('Chapter shared.')
-      } else {
-        await window.navigator.clipboard.writeText(filmUrl)
-        setFeedback('Film link copied.')
-      }
-      await api.sendEvent(session.id, 'share')
-    } catch {
-      setFeedback('Your chapter is ready to share when you are.')
-    }
-  }
-
-  const hearChapter = () => {
-    const video = filmVideoRef.current
-    if (!video) return
-    video.currentTime = 0
-    video.muted = false
-    void video.play().catch(() => setFeedback('Tap play to hear your chapter.'))
-  }
-
-  const chooseCta = async (value: 'reserve' | 'send') => {
-    setFeedback('')
-    try {
-      await api.sendEvent(session.id, 'cta', value)
-      setCompletion(value)
-      setView('confirmation')
-    } catch {
-      setFeedback('That next step is taking a moment. Please try again.')
-    }
-  }
-
-  const shellClass =
-    'relative h-[100dvh] w-full touch-pan-y overflow-y-auto px-6 py-8 text-[#F3EBDD] transition-opacity duration-500'
-
-  if (view === 'picker') {
-    return (
-      <section data-testid="film-stage" data-session-id={session.id} className={shellClass} style={screenStyle}>
-        <div className="mx-auto flex min-h-full w-full max-w-md flex-col">
-          <BrandMark />
-          <div className="my-auto py-8">
-            <p className="mb-3 text-xs uppercase tracking-[0.3em] text-[#B3894F]">05 · Your chapter</p>
-            <h1 className="font-serif text-5xl leading-none">Say your line.</h1>
-            <p className="mt-4 text-[#F3EBDD]/65">Choose the words that make this story yours.</p>
-            <div className="mt-7 grid gap-3">
-              {lines.map((line) => (
-                <button
-                  type="button"
-                  key={line}
-                  aria-label={`Choose line: ${line}`}
-                  aria-pressed={!writingCustom && selectedLine === line}
-                  onClick={() => {
-                    setWritingCustom(false)
-                    setSelectedLine(line)
-                  }}
-                  className={`min-h-16 rounded-3xl border px-5 py-4 text-left font-serif text-lg transition active:scale-[0.98] ${
-                    !writingCustom && selectedLine === line
-                      ? 'border-[#F3EBDD] bg-[#B3894F] text-[#0a0a0a]'
-                      : 'border-[#B3894F]/60 bg-[#0a0a0a]'
-                  }`}
-                >
-                  “{line}”
-                </button>
-              ))}
-            </div>
-            <button
-              type="button"
-              onClick={() => setWritingCustom(true)}
-              aria-pressed={writingCustom}
-              className="mt-3 min-h-14 w-full rounded-full border border-[#F3EBDD]/35 px-5 text-sm uppercase tracking-[0.16em] transition active:scale-[0.98]"
-            >
-              Write your own line
-            </button>
-            {writingCustom && (
-              <label className="mt-4 block text-sm text-[#F3EBDD]/70">
-                Your chapter line
-                <textarea
-                  autoFocus
-                  value={customLine}
-                  onChange={(event) => setCustomLine(event.target.value)}
-                  maxLength={120}
-                  rows={2}
-                  className="mt-2 min-h-20 w-full resize-none rounded-3xl border border-[#B3894F]/70 bg-transparent px-5 py-4 text-base text-[#F3EBDD] outline-none focus:border-[#F3EBDD]"
-                />
-              </label>
-            )}
-            <button
-              type="button"
-              disabled={writingCustom && !customLine.trim()}
-              onClick={() => void makeFilm()}
-              className="mt-5 min-h-16 w-full rounded-full bg-[#F3EBDD] px-6 font-medium text-[#0a0a0a] transition active:scale-[0.98] disabled:opacity-40"
-            >
-              Make my film
-            </button>
-          </div>
-        </div>
-      </section>
-    )
-  }
-
-  if (view === 'pending') {
-    return (
-      <section data-testid="film-stage" data-session-id={session.id} className={`${screenClass} flex items-end p-6`} style={screenStyle}>
-        <div
-          className="absolute inset-0 bg-cover bg-center opacity-55 motion-safe:animate-pulse"
-          style={{ backgroundImage: `url(${session.selfie_url ?? session.anchor_url})` }}
-        />
-        <div className="absolute inset-0 bg-gradient-to-t from-[#0a0a0a] via-[#0a0a0a]/35 to-[#0a0a0a]/70" />
-        <div className="absolute right-5 top-5 rounded-full border border-[#B3894F]/70 bg-[#0a0a0a]/70 px-3 py-2 text-[10px] uppercase tracking-[0.16em]">
-          LTX · {generationSeconds}s
-        </div>
-        <div className="relative w-full pb-[max(1rem,env(safe-area-inset-bottom))]">
-          <BrandMark />
-          <h1 className="mt-5 font-serif text-5xl leading-none">Cutting your chapter…</h1>
-          <p className="mt-4 text-sm uppercase tracking-[0.18em] text-[#B3894F]">
-            &amp;Coach · {session.name || 'You'}, {neighbourhood}
-          </p>
-          <p aria-live="polite" className="mt-3 min-h-6 text-sm text-[#F3EBDD]/65">
-            {feedback || 'Your nine-second London story is taking shape.'}
-          </p>
-        </div>
-      </section>
-    )
-  }
-
-  if (view === 'failed') {
-    return (
-      <section data-testid="film-stage" data-session-id={session.id} className={`${shellClass} flex items-center`} style={screenStyle}>
-        <div role="alert" className="mx-auto w-full max-w-md rounded-[2rem] border border-[#8a1f2d] bg-[#8a1f2d]/15 p-7 text-center">
-          <BrandMark />
-          <h1 className="mt-6 font-serif text-4xl">Your film couldn't be cut just yet.</h1>
-          <p className="mt-4 text-[#F3EBDD]/70">Your line is saved. Return to the cutting room whenever you're ready.</p>
-          <button
-            type="button"
-            onClick={() => {
-              setFeedback('')
-              setView('picker')
-            }}
-            className="mt-7 min-h-14 w-full rounded-full bg-[#F3EBDD] px-6 text-[#0a0a0a] transition active:scale-[0.98]"
-          >
-            Try again
-          </button>
-        </div>
-      </section>
-    )
-  }
-
-  if (view === 'confirmation') {
-    return (
-      <section data-testid="film-stage" data-session-id={session.id} className={`${shellClass} flex items-center text-center`} style={screenStyle}>
-        <div className="mx-auto w-full max-w-md">
-          <div className="mx-auto flex h-24 w-24 items-center justify-center rounded-full border border-[#B3894F] font-serif text-5xl text-[#B3894F]">C</div>
-          <p className="mt-8 text-xs uppercase tracking-[0.3em] text-[#B3894F]">&amp;Coach · Chapter complete</p>
-          <h1 className="mt-4 font-serif text-5xl leading-none">
-            {completion === 'reserve' ? 'See you on Regent Street.' : 'Your chapter is ready to travel.'}
-          </h1>
-          <p className="mt-5 text-[#F3EBDD]/70">{author} next chapter starts here, with Coach &amp; you.</p>
-        </div>
-      </section>
-    )
-  }
-
+function Complete({ session, product }: { session: Session; product: ProductKey }) {
+  const details = PRODUCTS[product]
   return (
-    <section data-testid="film-stage" data-session-id={session.id} className={shellClass} style={screenStyle}>
-      <div className="mx-auto flex min-h-full w-full max-w-md flex-col">
-        <BrandMark />
-        <div className="relative mx-auto mt-6 aspect-[9/16] max-h-[56dvh] w-full overflow-hidden rounded-[2rem] border shadow-[0_18px_70px_rgba(179,137,79,0.24)]" style={{ backgroundColor: COACH.black, borderColor: `${COACH.tan}99` }}>
-          <video ref={filmVideoRef} data-testid="chapter-film" src={filmUrl ?? undefined} autoPlay muted loop playsInline controls className="h-full w-full object-cover" />
-          <div className="pointer-events-none absolute inset-x-0 bottom-0 p-5 pt-16" style={{ background: `linear-gradient(to top, ${COACH.black}d9, transparent)` }}>
-            <p className="font-serif text-2xl">&amp;Coach · {session.name || 'You'}, {neighbourhood}</p>
-          </div>
-        </div>
-        <div className="mt-5 grid gap-3 pb-[max(1rem,env(safe-area-inset-bottom))]">
-          <button type="button" onClick={hearChapter} className="min-h-14 rounded-full border px-6 font-medium transition active:scale-[0.98]" style={{ backgroundColor: COACH.tan, borderColor: COACH.cream, color: COACH.black }}>
-            Hear my chapter
-          </button>
-          <button type="button" onClick={() => void shareFilm()} className="min-h-14 rounded-full px-6 font-medium transition active:scale-[0.98]" style={{ backgroundColor: COACH.cream, color: COACH.black }}>
-            Share your chapter
-          </button>
-          <button type="button" onClick={() => void chooseCta('reserve')} className="min-h-14 rounded-full border border-[#B3894F] px-5 transition active:scale-[0.98]">
-            Reserve the {bag} at Coach Regent Street
-          </button>
-          <button type="button" onClick={() => void chooseCta('send')} className="min-h-14 rounded-full border border-[#F3EBDD]/35 px-5 transition active:scale-[0.98]">
-            Send to a friend
-          </button>
-          <p aria-live="polite" className="min-h-6 text-center text-sm text-[#B3894F]">{feedback}</p>
-        </div>
+    <main className={`${screenClass} flex items-center px-6 text-center`} style={screenStyle}>
+      <div className="mx-auto w-full max-w-md">
+        <div className="mx-auto flex h-24 w-24 items-center justify-center rounded-full border border-[#B3894F] font-serif text-5xl text-[#B3894F]">C</div>
+        <p className="mt-8 text-xs uppercase tracking-[0.3em] text-[#B3894F]">&amp;Coach · Selection complete</p>
+        <h1 className="mt-4 font-serif text-5xl leading-none">Carry your courage.</h1>
+        <p className="mt-5 text-lg text-[#F3EBDD]/75">
+          {session.name || 'Your'} chose the Coach {details.label}.
+        </p>
       </div>
-    </section>
+    </main>
   )
 }
 
@@ -972,10 +781,40 @@ function LivePlay() {
   const [questionStepKey, setQuestionStepKey] = useState(0)
   const [sessionId, setSessionId] = useState('')
   const [session, setSession] = useState<Session | null>(null)
-  const [jwt, setJwt] = useState<string | null>(null)
-  const [tokenSettled, setTokenSettled] = useState(false)
+  const [streetJwt, setStreetJwt] = useState<string | null>(null)
+  const [streetTokenSettled, setStreetTokenSettled] = useState(false)
+  const [immersiveJwt, setImmersiveJwt] = useState<string | null>(null)
+  const [immersiveWorldPromise, setImmersiveWorldPromise] = useState<Promise<ImmersiveWorldRecord>>(
+    () => Promise.resolve({ world_id: null }),
+  )
+  const [inspectedProduct, setInspectedProduct] = useState<ProductKey | null>(null)
+  const [selectedProduct, setSelectedProduct] = useState<ProductKey | null>(null)
   const [loading, setLoading] = useState(false)
   const [entryError, setEntryError] = useState('')
+  const [streetShutdown, setStreetShutdown] = useState<Promise<boolean>>(() => Promise.resolve(false))
+  const streetClosedRef = useRef(false)
+  const immersiveEnteredRef = useRef(false)
+  const worldStartedRef = useRef<number | null>(null)
+  const worldTimeSentRef = useRef(false)
+
+  const fetchStreetToken = useCallback(() => {
+    setStreetTokenSettled(false)
+    void api.reactorToken()
+      .then(({ jwt }) => setStreetJwt(jwt))
+      .catch(() => setStreetJwt(null))
+      .finally(() => setStreetTokenSettled(true))
+  }, [])
+
+  const retryImmersiveToken = useCallback(async () => {
+    if (!streetClosedRef.current) return null
+    try {
+      const { jwt } = await api.reactorToken()
+      setImmersiveJwt(jwt)
+      return jwt
+    } catch {
+      return null
+    }
+  }, [])
 
   const enter = async () => {
     if (loading) return
@@ -983,16 +822,7 @@ function LivePlay() {
     setEntryError('')
     const orientation = window.DeviceOrientationEvent as OrientationPermissionEvent | undefined
     if (orientation?.requestPermission) void orientation.requestPermission().catch(() => 'denied')
-
-    setTokenSettled(false)
-    void api
-      .reactorToken()
-      .then(({ jwt: token }) => {
-        setJwt(token)
-        return token
-      })
-      .catch(() => null)
-      .finally(() => setTokenSettled(true))
+    fetchStreetToken()
 
     try {
       const created = await api.createSession()
@@ -1006,14 +836,24 @@ function LivePlay() {
     }
   }
 
+  const sendWorldTime = useCallback(() => {
+    if (!session || worldStartedRef.current === null || worldTimeSentRef.current) return
+    worldTimeSentRef.current = true
+    const elapsed = Math.max(1, Math.round(performance.now() - worldStartedRef.current))
+    void api.sendEvent(session.id, 'world_time', elapsed).catch(() => undefined)
+  }, [session])
+
   useEffect(() => {
     if (!sessionId) return
     const onVisibility = () => {
-      if (document.visibilityState === 'hidden') void api.sendEvent(sessionId, 'drop').catch(() => undefined)
+      if (document.visibilityState !== 'hidden') return
+      void api.sendEvent(sessionId, 'drop').catch(() => undefined)
     }
     document.addEventListener('visibilitychange', onVisibility)
     return () => document.removeEventListener('visibilitychange', onVisibility)
   }, [sessionId])
+
+  useEffect(() => () => sendWorldTime(), [sendWorldTime])
 
   if (stage === 'enter') return <Entry loading={loading} error={entryError} onEnter={() => void enter()} />
 
@@ -1037,28 +877,73 @@ function LivePlay() {
     return (
       <Street
         session={session}
-        jwt={jwt}
-        tokenSettled={tokenSettled}
-        onRetryToken={() => {
-          setTokenSettled(false)
-          void api
-            .reactorToken()
-            .then(({ jwt: token }) => {
-              setJwt(token)
-              return token
-            })
-            .catch(() => null)
-            .finally(() => setTokenSettled(true))
-        }}
-        onEnterStore={() => {
-          setStage('mirror')
+        jwt={streetJwt}
+        tokenSettled={streetTokenSettled}
+        onRetryToken={fetchStreetToken}
+        onEnterStore={(shutdown) => {
+          setStreetShutdown(shutdown)
+          void shutdown.then((closed) => { streetClosedRef.current = closed })
+          setStage('portal')
           void api.sendEvent(session.id, 'store_enter').catch(() => undefined)
         }}
       />
     )
   }
 
-  if (stage === 'mirror') return <MirrorStage session={session} jwt={jwt} onComplete={() => setStage('film')} />
+  if (stage === 'portal') {
+    return (
+      <Portal
+        shutdown={streetShutdown}
+        onReady={(jwt, worldPromise) => {
+          setImmersiveJwt(jwt)
+          setImmersiveWorldPromise(worldPromise)
+          setStage('immersive')
+          worldStartedRef.current = performance.now()
+          if (!immersiveEnteredRef.current) {
+            immersiveEnteredRef.current = true
+            void api.sendEvent(session.id, 'immersive_enter').catch(() => undefined)
+          }
+        }}
+      />
+    )
+  }
 
-  return <FilmStage session={session} />
+  if (stage === 'complete' && selectedProduct) {
+    return <Complete session={session} product={selectedProduct} />
+  }
+
+  const viewProduct = (product: ProductKey) => {
+    setInspectedProduct(product)
+    setStage('product')
+    void api.sendEvent(session.id, 'product_view', product).catch(() => undefined)
+  }
+
+  return (
+    <>
+      <ImmersiveWorld
+        id={session.id}
+        jwt={immersiveJwt}
+        worldPromise={immersiveWorldPromise}
+        onRetryToken={retryImmersiveToken}
+        onViewProduct={viewProduct}
+      />
+      {stage === 'product' && inspectedProduct && (
+        <ProductInspector
+          initialProduct={inspectedProduct}
+          onView={viewProduct}
+          onClose={() => {
+            setInspectedProduct(null)
+            setStage('immersive')
+          }}
+          onSelect={(product) => {
+            setSelectedProduct(product)
+            setInspectedProduct(null)
+            sendWorldTime()
+            void api.sendEvent(session.id, 'product_select', product).catch(() => undefined)
+            setStage('complete')
+          }}
+        />
+      )}
+    </>
+  )
 }
