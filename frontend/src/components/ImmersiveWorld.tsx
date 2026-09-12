@@ -18,14 +18,14 @@ import type { ImmersiveStatus } from '../lib/immersive'
 
 export interface ImmersiveWorldProps {
   id: string
-  jwt: string
+  jwt: string | null
+  onRetryToken?: () => Promise<boolean>
   onViewProduct: (product: ProductKey) => void
-  onSelectProduct: (product: ProductKey) => void
 }
 
-type FallbackReason = 'kill-switch' | 'timeout' | 'error'
+type FallbackReason = 'kill-switch' | 'token' | 'timeout' | 'error'
 
-type ExperienceProps = Omit<ImmersiveWorldProps, 'jwt'> & {
+type ExperienceProps = Omit<ImmersiveWorldProps, 'jwt' | 'onRetryToken'> & {
   onFallback: (
     reason: Exclude<FallbackReason, 'kill-switch'>,
     disconnected: Promise<void>,
@@ -34,29 +34,18 @@ type ExperienceProps = Omit<ImmersiveWorldProps, 'jwt'> & {
 
 const CONTROL_CLASS = 'min-h-14 rounded-full border border-[#F3EBDD]/45 bg-black/65 px-4 text-sm font-semibold text-[#F3EBDD] shadow-lg backdrop-blur transition active:scale-95 disabled:cursor-not-allowed disabled:opacity-40'
 
-function ProductControls({
-  onViewProduct,
-  onSelectProduct,
-}: Pick<ImmersiveWorldProps, 'onViewProduct' | 'onSelectProduct'>) {
+function ProductControls({ onViewProduct }: Pick<ImmersiveWorldProps, 'onViewProduct'>) {
   return (
     <div className="grid grid-cols-2 gap-2" aria-label="Product plinths">
       {(Object.keys(PRODUCTS) as ProductKey[]).map((product) => (
-        <div key={product} className="grid gap-2 rounded-[1.5rem] border border-[#B3894F]/55 bg-black/55 p-2 backdrop-blur">
-          <button
-            type="button"
-            className={CONTROL_CLASS}
-            onClick={() => onViewProduct(product)}
-          >
-            Explore {PRODUCTS[product].label}
-          </button>
-          <button
-            type="button"
-            className="min-h-14 rounded-full bg-[#F3EBDD] px-4 text-sm font-semibold text-[#160d0b] transition active:scale-95"
-            onClick={() => onSelectProduct(product)}
-          >
-            Choose {PRODUCTS[product].label}
-          </button>
-        </div>
+        <button
+          key={product}
+          type="button"
+          className={CONTROL_CLASS}
+          onClick={() => onViewProduct(product)}
+        >
+          Explore {PRODUCTS[product].label}
+        </button>
       ))}
     </div>
   )
@@ -93,7 +82,7 @@ function Status({ status }: { status: ImmersiveStatus }) {
   )
 }
 
-function Experience({ id, onViewProduct, onSelectProduct, onFallback }: ExperienceProps) {
+function Experience({ id, onViewProduct, onFallback }: ExperienceProps) {
   const {
     phase,
     streaming,
@@ -256,7 +245,7 @@ function Experience({ id, onViewProduct, onSelectProduct, onFallback }: Experien
             Look right
           </button>
         </div>
-        <ProductControls onViewProduct={onViewProduct} onSelectProduct={onSelectProduct} />
+        <ProductControls onViewProduct={onViewProduct} />
       </div>
     </section>
   )
@@ -268,8 +257,7 @@ function FallbackExperience({
   retrying,
   onRetry,
   onViewProduct,
-  onSelectProduct,
-}: Omit<ImmersiveWorldProps, 'jwt'> & {
+}: Omit<ImmersiveWorldProps, 'jwt' | 'onRetryToken'> & {
   reason: FallbackReason
   retrying: boolean
   onRetry: () => void
@@ -289,16 +277,17 @@ function FallbackExperience({
         )}
       </div>
       <div className="absolute inset-x-0 bottom-0 bg-gradient-to-t from-black via-black/70 to-transparent px-4 pb-[max(1rem,env(safe-area-inset-bottom))] pt-20">
-        <ProductControls onViewProduct={onViewProduct} onSelectProduct={onSelectProduct} />
+        <ProductControls onViewProduct={onViewProduct} />
       </div>
     </section>
   )
 }
 
 export default function ImmersiveWorld(props: ImmersiveWorldProps) {
-  const [fallbackReason, setFallbackReason] = useState<FallbackReason | null>(() => (
-    reactorKillSwitchEnabled() ? 'kill-switch' : null
-  ))
+  const [fallbackReason, setFallbackReason] = useState<FallbackReason | null>(() => {
+    if (reactorKillSwitchEnabled()) return 'kill-switch'
+    return props.jwt ? null : 'token'
+  })
   const [providerKey, setProviderKey] = useState(0)
   const [retrying, setRetrying] = useState(false)
   const pendingDisconnectRef = useRef<Promise<void>>(Promise.resolve())
@@ -314,21 +303,23 @@ export default function ImmersiveWorld(props: ImmersiveWorldProps) {
     retryInFlightRef.current = true
     setRetrying(true)
     await pendingDisconnectRef.current
-    setFallbackReason(null)
-    setProviderKey((key) => key + 1)
+    const tokenReady = props.jwt ? true : await props.onRetryToken?.() ?? false
+    if (tokenReady) {
+      setFallbackReason(null)
+      setProviderKey((key) => key + 1)
+    }
     setRetrying(false)
     retryInFlightRef.current = false
   }
 
-  if (fallbackReason) {
+  if (fallbackReason || !props.jwt) {
     return (
       <FallbackExperience
         id={props.id}
-        reason={fallbackReason}
+        reason={fallbackReason ?? 'token'}
         retrying={retrying}
         onRetry={retry}
         onViewProduct={props.onViewProduct}
-        onSelectProduct={props.onSelectProduct}
       />
     )
   }
@@ -339,7 +330,6 @@ export default function ImmersiveWorld(props: ImmersiveWorldProps) {
         id={props.id}
         onFallback={enterFallback}
         onViewProduct={props.onViewProduct}
-        onSelectProduct={props.onSelectProduct}
       />
     </HappyOysterProvider>
   )
