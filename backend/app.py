@@ -20,7 +20,7 @@ import secrets as pysecrets
 import time
 
 import modal
-from fastapi import FastAPI, File, Form, Request, UploadFile
+from fastapi import FastAPI, File, Form, HTTPException, Request, UploadFile
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import FileResponse
 
@@ -104,7 +104,7 @@ def create_session():
 def answers(body: dict):
     s = get_session(body["id"])
     if s is None:
-        return {"error": "unknown session"}, 404
+        raise HTTPException(404, "unknown session")
     s["name"] = body.get("name", "")
     s["neighbourhood"] = body["neighbourhood"]
     s["chapter"] = body["chapter"]
@@ -123,7 +123,7 @@ def answers(body: dict):
 def event(body: dict):
     s = get_session(body["id"])
     if s is None:
-        return {"error": "unknown session"}, 404
+        raise HTTPException(404, "unknown session")
     t, v = body["type"], body.get("value")
     if t == "street_enter":
         s["step"] = "street"
@@ -156,7 +156,7 @@ def event(body: dict):
 async def selfie(request: Request, id: str = Form(...), file: UploadFile = File(...)):
     s = get_session(id)
     if s is None:
-        return {"error": "unknown session"}, 404
+        raise HTTPException(404, "unknown session")
     data = await file.read()
     path = pathlib.Path(FILES) / "selfies" / f"{id}.jpg"
     path.parent.mkdir(parents=True, exist_ok=True)
@@ -170,15 +170,16 @@ async def selfie(request: Request, id: str = Form(...), file: UploadFile = File(
 
 @web.get("/api/files/{path:path}")
 def get_file(path: str):
-    p = (pathlib.Path(FILES) / path).resolve()
-    if not str(p).startswith(FILES + "/"):
-        return {"error": "not found"}, 404
+    root = pathlib.Path(FILES).resolve()
+    p = (root / path).resolve()
+    if not p.is_relative_to(root):
+        raise HTTPException(404, "not found")
     try:
         files_vol.reload()
     except Exception:
         pass
     if not p.is_file():
-        return {"error": "not found"}, 404
+        raise HTTPException(404, "not found")
     return FileResponse(p)
 
 
@@ -186,7 +187,7 @@ def get_file(path: str):
 def film(request: Request, body: dict):
     s = get_session(body["id"])
     if s is None:
-        return {"error": "unknown session"}, 404
+        raise HTTPException(404, "unknown session")
     s["film_status"] = "pending"
     s["step"] = "film"
     s["_origin"] = str(request.base_url)
@@ -212,7 +213,7 @@ def reactor_token():
 def read_session(sid: str):
     s = get_session(sid)
     if s is None:
-        return {"error": "unknown session"}, 404
+        raise HTTPException(404, "unknown session")
     return s
 
 
