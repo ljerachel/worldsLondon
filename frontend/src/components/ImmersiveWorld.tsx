@@ -9,6 +9,7 @@ import type { PointerEvent as ReactPointerEvent } from 'react'
 import { PORTAL_VIDEO_URL, PRODUCTS, WORLD_ANCHOR_URL } from '../data/products'
 import type { ProductKey } from '../data/products'
 import { api } from '../lib/api'
+import type { ImmersiveWorldRecord } from '../lib/api'
 import {
   IMMERSIVE_PROMPT,
   IMMERSIVE_STREAM_TIMEOUT_MS,
@@ -19,7 +20,8 @@ import type { ImmersiveStatus } from '../lib/immersive'
 export interface ImmersiveWorldProps {
   id: string
   jwt: string | null
-  onRetryToken?: () => Promise<boolean>
+  worldPromise: Promise<ImmersiveWorldRecord>
+  onRetryToken?: () => Promise<string | null>
   onViewProduct: (product: ProductKey) => void
 }
 
@@ -82,7 +84,7 @@ function Status({ status }: { status: ImmersiveStatus }) {
   )
 }
 
-function Experience({ id, onViewProduct, onFallback }: ExperienceProps) {
+function Experience({ id, worldPromise, onViewProduct, onFallback }: ExperienceProps) {
   const {
     phase,
     streaming,
@@ -123,27 +125,27 @@ function Experience({ id, onViewProduct, onFallback }: ExperienceProps) {
   useHappyOysterTravelError(() => failToFallback('error'))
 
   useEffect(() => {
+    startupTimeoutRef.current = window.setTimeout(
+      () => failToFallback('timeout'),
+      IMMERSIVE_STREAM_TIMEOUT_MS,
+    )
     return () => {
       mountedRef.current = false
       clearStartupTimeout()
       void stop().catch(() => undefined)
       void disconnectOnce()
     }
-  }, [clearStartupTimeout, disconnectOnce, stop])
+  }, [clearStartupTimeout, disconnectOnce, failToFallback, stop])
 
   useEffect(() => {
     if (phase !== 'connected' || lifecycleStartedRef.current) return
     lifecycleStartedRef.current = true
-    startupTimeoutRef.current = window.setTimeout(
-      () => failToFallback('timeout'),
-      IMMERSIVE_STREAM_TIMEOUT_MS,
-    )
 
     void (async () => {
       try {
         let savedWorldId: string | null = null
         try {
-          const savedWorld = await api.getImmersiveWorld()
+          const savedWorld = await worldPromise
           savedWorldId = savedWorld.world_id
         } catch {
           // Persistence must never prevent a temporary world from opening.
@@ -172,7 +174,7 @@ function Experience({ id, onViewProduct, onFallback }: ExperienceProps) {
         failToFallback('error')
       }
     })()
-  }, [attachWorld, createWorld, failToFallback, phase, startTravel])
+  }, [attachWorld, createWorld, failToFallback, phase, startTravel, worldPromise])
 
   useEffect(() => {
     if (streaming || phase === 'ended') clearStartupTimeout()
@@ -257,7 +259,7 @@ function FallbackExperience({
   retrying,
   onRetry,
   onViewProduct,
-}: Omit<ImmersiveWorldProps, 'jwt' | 'onRetryToken'> & {
+}: Omit<ImmersiveWorldProps, 'jwt' | 'worldPromise' | 'onRetryToken'> & {
   reason: FallbackReason
   retrying: boolean
   onRetry: () => void
@@ -289,6 +291,7 @@ export default function ImmersiveWorld(props: ImmersiveWorldProps) {
     return props.jwt ? null : 'token'
   })
   const [providerKey, setProviderKey] = useState(0)
+  const [retryJwt, setRetryJwt] = useState<string | null>(null)
   const [retrying, setRetrying] = useState(false)
   const pendingDisconnectRef = useRef<Promise<void>>(Promise.resolve())
   const retryInFlightRef = useRef(false)
@@ -303,8 +306,9 @@ export default function ImmersiveWorld(props: ImmersiveWorldProps) {
     retryInFlightRef.current = true
     setRetrying(true)
     await pendingDisconnectRef.current
-    const tokenReady = props.jwt ? true : await props.onRetryToken?.() ?? false
-    if (tokenReady) {
+    const freshJwt = await props.onRetryToken?.() ?? null
+    if (freshJwt) {
+      setRetryJwt(freshJwt)
       setFallbackReason(null)
       setProviderKey((key) => key + 1)
     }
@@ -312,7 +316,9 @@ export default function ImmersiveWorld(props: ImmersiveWorldProps) {
     retryInFlightRef.current = false
   }
 
-  if (fallbackReason || !props.jwt) {
+  const activeJwt = retryJwt ?? props.jwt
+
+  if (fallbackReason || !activeJwt) {
     return (
       <FallbackExperience
         id={props.id}
@@ -325,9 +331,10 @@ export default function ImmersiveWorld(props: ImmersiveWorldProps) {
   }
 
   return (
-    <HappyOysterProvider key={providerKey} mode="adventure" jwt={props.jwt} autoConnect>
+    <HappyOysterProvider key={providerKey} mode="adventure" jwt={activeJwt} autoConnect>
       <Experience
         id={props.id}
+        worldPromise={props.worldPromise}
         onFallback={enterFallback}
         onViewProduct={props.onViewProduct}
       />

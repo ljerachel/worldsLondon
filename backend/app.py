@@ -106,19 +106,21 @@ def create_session():
 
 @web.get("/api/immersive-world")
 def immersive_world():
-    return {"world_id": state.get("immersive_world_id")}
+    world_id = state.get("immersive_world_id")
+    return {"world_id": world_id if isinstance(world_id, str) else None}
 
 
 @web.post("/api/immersive-world")
 def save_immersive_world(body: dict):
     raw_world_id = body.get("world_id")
-    world_id = str(raw_world_id).strip() if raw_world_id is not None else ""
-    if not world_id:
-        raise HTTPException(422, "world_id is required")
+    if not isinstance(raw_world_id, str) or not raw_world_id.strip():
+        raise HTTPException(422, "world_id must be a non-empty string")
+    world_id = raw_world_id.strip()
     existing = state.get("immersive_world_id")
-    if not existing:
+    if not isinstance(existing, str) or not existing:
         state["immersive_world_id"] = world_id
-    return {"world_id": existing or world_id}
+        existing = world_id
+    return {"world_id": existing}
 
 
 @web.post("/api/answers")
@@ -183,7 +185,15 @@ def event(body: dict):
             raise HTTPException(422, "invalid product")
         s["selected_product"] = v
     elif t == "world_time":
-        s["world_ms"] = (s.get("world_ms") or 0) + int(v or 0)
+        if isinstance(v, bool):
+            raise HTTPException(422, "world_time must be a non-negative integer")
+        try:
+            world_ms = int(v)
+        except (TypeError, ValueError, OverflowError):
+            raise HTTPException(422, "world_time must be a non-negative integer") from None
+        if world_ms < 0 or world_ms != v:
+            raise HTTPException(422, "world_time must be a non-negative integer")
+        s["world_ms"] = (s.get("world_ms") or 0) + world_ms
     save_session(s)
     return {"ok": True}
 

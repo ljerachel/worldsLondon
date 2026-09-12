@@ -7,6 +7,7 @@ import Play from './Play'
 
 const mocks = vi.hoisted(() => ({
   createSession: vi.fn(),
+  getImmersiveWorld: vi.fn(),
   reactorToken: vi.fn(),
   sendAnswers: vi.fn(),
   sendEvent: vi.fn(),
@@ -23,6 +24,7 @@ const mocks = vi.hoisted(() => ({
 vi.mock('../lib/api', () => ({
   api: {
     createSession: mocks.createSession,
+    getImmersiveWorld: mocks.getImmersiveWorld,
     reactorToken: mocks.reactorToken,
     sendAnswers: mocks.sendAnswers,
     sendEvent: mocks.sendEvent,
@@ -87,6 +89,7 @@ describe('Play', () => {
     vi.clearAllMocks()
     localStorage.clear()
     mocks.createSession.mockResolvedValue({ id: 'session-1' })
+    mocks.getImmersiveWorld.mockResolvedValue({ world_id: null })
     mocks.reactorToken
       .mockResolvedValueOnce({ jwt: 'street-jwt' })
       .mockResolvedValue({ jwt: 'immersive-jwt' })

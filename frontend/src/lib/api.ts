@@ -3,6 +3,10 @@ export const BASE = import.meta.env.VITE_API_URL as string
 export type Step = 'opened' | 'questions' | 'street' | 'store' | 'film' | 'done'
 export type FilmStatus = 'none' | 'pending' | 'ready' | 'failed'
 
+export interface ImmersiveWorldRecord {
+  world_id: string | null
+}
+
 export interface Session {
   id: string
   name: string
@@ -63,7 +67,7 @@ async function post<T>(path: string, body: unknown): Promise<T> {
 
 export const api = {
   createSession: () => post<{ id: string }>('/api/session', {}),
-  getImmersiveWorld: () => get<{ world_id: string | null }>('/api/immersive-world'),
+  getImmersiveWorld: () => get<ImmersiveWorldRecord>('/api/immersive-world'),
   saveImmersiveWorld: (worldId: string) =>
     post<{ world_id: string }>('/api/immersive-world', { world_id: worldId }),
   sendAnswers: (a: {

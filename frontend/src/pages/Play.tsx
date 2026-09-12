@@ -6,7 +6,7 @@ import type { BagKey, ChapterKey, NeighbourhoodKey } from '../data/config'
 import { PORTAL_VIDEO_URL, PRODUCTS } from '../data/products'
 import type { ProductKey } from '../data/products'
 import { api } from '../lib/api'
-import type { Session } from '../lib/api'
+import type { ImmersiveWorldRecord, Session } from '../lib/api'
 import { openWorld } from '../lib/world'
 import type { WorldHandle } from '../lib/world'
 
@@ -489,16 +489,24 @@ function Street({
   )
 }
 
-function Portal({ onReady }: { onReady: (jwt: string | null) => void }) {
+function Portal({
+  onReady,
+}: {
+  onReady: (jwt: string | null, worldPromise: Promise<ImmersiveWorldRecord>) => void
+}) {
   const [canEnter, setCanEnter] = useState(false)
   const [token, setToken] = useState<string | null>(null)
   const [tokenSettled, setTokenSettled] = useState(false)
   const enteredRef = useRef(false)
   const tokenRequestRef = useRef<Promise<string | null>>(Promise.resolve(null))
+  const worldRequestRef = useRef<Promise<ImmersiveWorldRecord>>(
+    Promise.resolve({ world_id: null }),
+  )
 
   useEffect(() => {
     let cancelled = false
     const timer = window.setTimeout(() => setCanEnter(true), 3_000)
+    worldRequestRef.current = api.getImmersiveWorld().catch(() => ({ world_id: null }))
     tokenRequestRef.current = api.reactorToken()
       .then(({ jwt }) => {
         if (!cancelled) setToken(jwt)
@@ -517,7 +525,7 @@ function Portal({ onReady }: { onReady: (jwt: string | null) => void }) {
   const enterWorld = async () => {
     if (enteredRef.current) return
     enteredRef.current = true
-    onReady(await tokenRequestRef.current)
+    onReady(await tokenRequestRef.current, worldRequestRef.current)
   }
 
   return (
@@ -579,6 +587,9 @@ export default function Play() {
   const [streetJwt, setStreetJwt] = useState<string | null>(null)
   const [streetTokenSettled, setStreetTokenSettled] = useState(false)
   const [immersiveJwt, setImmersiveJwt] = useState<string | null>(null)
+  const [immersiveWorldPromise, setImmersiveWorldPromise] = useState<Promise<ImmersiveWorldRecord>>(
+    () => Promise.resolve({ world_id: null }),
+  )
   const [inspectedProduct, setInspectedProduct] = useState<ProductKey | null>(null)
   const [selectedProduct, setSelectedProduct] = useState<ProductKey | null>(null)
   const [loading, setLoading] = useState(false)
@@ -599,9 +610,9 @@ export default function Play() {
     try {
       const { jwt } = await api.reactorToken()
       setImmersiveJwt(jwt)
-      return true
+      return jwt
     } catch {
-      return false
+      return null
     }
   }, [])
 
@@ -678,8 +689,9 @@ export default function Play() {
   if (stage === 'portal') {
     return (
       <Portal
-        onReady={(jwt) => {
+        onReady={(jwt, worldPromise) => {
           setImmersiveJwt(jwt)
+          setImmersiveWorldPromise(worldPromise)
           setStage('immersive')
           worldStartedRef.current = performance.now()
           if (!immersiveEnteredRef.current) {
@@ -706,6 +718,7 @@ export default function Play() {
       <ImmersiveWorld
         id={session.id}
         jwt={immersiveJwt}
+        worldPromise={immersiveWorldPromise}
         onRetryToken={retryImmersiveToken}
         onViewProduct={viewProduct}
       />
