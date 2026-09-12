@@ -72,6 +72,69 @@ async function reachStreet(name = 'Maya') {
   return user
 }
 
+describe('Smooth demo', () => {
+  beforeEach(() => {
+    vi.clearAllMocks()
+    window.history.replaceState({}, '', '/play?demo=1')
+  })
+
+  afterEach(() => {
+    window.history.replaceState({}, '', '/play')
+    vi.useRealTimers()
+    vi.restoreAllMocks()
+  })
+
+  it('completes the Soho demo without any backend or Reactor requests', async () => {
+    const user = userEvent.setup()
+    render(<Play />)
+    await user.click(screen.getByRole('button', { name: 'Start smooth Soho demo' }))
+    expect(screen.getByText('Smooth demo · local scene')).toBeInTheDocument()
+    expect(screen.getByAltText('Soho at night')).toHaveAttribute('src', '/neigh/soho-bignight.png')
+    await user.click(screen.getByRole('button', { name: 'Enter Coach' }))
+    expect(screen.getByRole('heading', { name: 'Your Soho chapter.' })).toBeInTheDocument()
+    await user.click(screen.getByRole('button', { name: 'Walk again' }))
+    expect(screen.getByRole('button', { name: 'Hold to walk' })).toBeInTheDocument()
+    expect(mocks.createSession).not.toHaveBeenCalled()
+    expect(mocks.reactorToken).not.toHaveBeenCalled()
+    expect(mocks.openWorld).not.toHaveBeenCalled()
+    expect(mocks.sendEvent).not.toHaveBeenCalled()
+  })
+
+  it('smooths tilt locally, zooms only while held, and stops on release or blur', async () => {
+    vi.useFakeTimers()
+    render(<Play />)
+    fireEvent.click(screen.getByRole('button', { name: 'Start smooth Soho demo' }))
+    const scene = screen.getByTestId('demo-scene')
+    const walk = screen.getByRole('button', { name: 'Hold to walk' })
+    const tilt = (gamma: number) => {
+      const event = new Event('deviceorientation')
+      Object.defineProperty(event, 'gamma', { value: gamma })
+      fireEvent(window, event)
+    }
+    tilt(10)
+    tilt(30)
+    await act(async () => vi.advanceTimersByTimeAsync(100))
+    const pan = Number(scene.style.transform.match(/translate3d\(([-\d.]+)px/)?.[1])
+    const zoom = () => Number(scene.style.transform.match(/scale\(([\d.]+)\)/)?.[1])
+    expect(pan).toBeLessThan(0)
+    expect(pan).toBeGreaterThan(-55)
+    expect(zoom()).toBe(1.18)
+    fireEvent.pointerDown(walk, { pointerId: 1 })
+    await act(async () => vi.advanceTimersByTimeAsync(1000))
+    expect(zoom()).toBeGreaterThan(1.2)
+    expect(zoom()).toBeLessThan(1.23)
+    fireEvent.pointerUp(walk, { pointerId: 1 })
+    await act(async () => vi.advanceTimersByTimeAsync(1000))
+    const stopped = scene.style.transform
+    await act(async () => vi.advanceTimersByTimeAsync(500))
+    expect(scene.style.transform).toBe(stopped)
+    fireEvent.pointerDown(walk, { pointerId: 2 })
+    fireEvent.blur(window)
+    await act(async () => vi.advanceTimersByTimeAsync(500))
+    expect(scene.style.transform).toBe(stopped)
+  })
+})
+
 describe('Play', () => {
   beforeEach(() => {
     vi.clearAllMocks()

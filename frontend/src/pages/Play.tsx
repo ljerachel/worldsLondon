@@ -796,7 +796,141 @@ export function FilmStage({ session }: FilmStageProps) {
   )
 }
 
+function SmoothDemo() {
+  const [stage, setStage] = useState<'enter' | 'street' | 'done'>('enter')
+  const sceneRef = useRef<HTMLDivElement>(null)
+  const input = useRef({ target: 0, neutral: null as number | null, walking: false, dragX: null as number | null })
+
+  useEffect(() => {
+    if (stage !== 'street') return
+    input.current = { target: 0, neutral: null, walking: false, dragX: null }
+    let frame = 0
+    let previous = performance.now()
+    let pan = 0
+    let zoom = 1.18
+    const animate = (now: number) => {
+      const dt = Math.max(0, Math.min(50, now - previous))
+      previous = now
+      pan += (input.current.target - pan) * (1 - Math.exp(-dt / 65))
+      if (Math.abs(input.current.target - pan) < 0.001) pan = input.current.target
+      if (input.current.walking) zoom = Math.min(1.65, zoom + dt * 0.000035)
+      if (sceneRef.current) {
+        sceneRef.current.style.transform = `translate3d(${(pan * -Math.min(window.innerWidth * 0.06, 55)).toFixed(3)}px, 0, 0) scale(${zoom.toFixed(5)})`
+      }
+      frame = window.requestAnimationFrame(animate)
+    }
+    const orient = (event: DeviceOrientationEvent) => {
+      if (event.gamma === null || !Number.isFinite(event.gamma) || input.current.dragX !== null) return
+      input.current.neutral ??= event.gamma
+      const tilt = event.gamma - input.current.neutral
+      input.current.target = Math.abs(tilt) < 1 ? 0 : Math.max(-1, Math.min(1, tilt / 25))
+    }
+    const stop = () => {
+      input.current.walking = false
+      input.current.dragX = null
+      previous = performance.now()
+    }
+    frame = window.requestAnimationFrame(animate)
+    window.addEventListener('deviceorientation', orient)
+    window.addEventListener('blur', stop)
+    document.addEventListener('visibilitychange', stop)
+    return () => {
+      window.cancelAnimationFrame(frame)
+      window.removeEventListener('deviceorientation', orient)
+      window.removeEventListener('blur', stop)
+      document.removeEventListener('visibilitychange', stop)
+      stop()
+    }
+  }, [stage])
+
+  const start = () => {
+    const orientation = window.DeviceOrientationEvent as OrientationPermissionEvent | undefined
+    if (orientation?.requestPermission) void orientation.requestPermission().catch(() => 'denied')
+    setStage('street')
+  }
+  const actionClass = 'min-h-14 rounded-full border border-[#B3894F]/70 bg-[#0a0a0a]/80 px-7 py-3 text-sm uppercase tracking-[0.15em]'
+
+  if (stage !== 'street') {
+    return (
+      <main className={`${screenClass} flex items-center justify-center px-7`} style={screenStyle}>
+        <img src="/neigh/soho-bignight.png" alt="" className="absolute inset-0 h-full w-full object-cover opacity-25" />
+        <div className="relative w-full max-w-md text-center">
+          <BrandMark />
+          <p className="mt-5 text-xs uppercase tracking-[0.2em] text-[#B3894F]">Smooth demo · Soho · Big night</p>
+          <h1 className="mt-5 font-serif text-5xl">{stage === 'done' ? 'Your Soho chapter.' : 'One night in Soho.'}</h1>
+          {stage === 'done' ? (
+            <>
+              <img src="/looks/brooklyn-1.png" alt="Brooklyn bag look" className="mx-auto mt-6 max-h-[35dvh] rounded-3xl object-contain" />
+              <p className="my-5">Brooklyn. Your companion for the night.</p>
+              <button type="button" className={actionClass} onClick={start}>Walk again</button>
+            </>
+          ) : (
+            <>
+              <p className="my-6 text-[#F3EBDD]/75">A local pan-and-zoom demo. Tilt or drag to look, hold to move closer. No live generation.</p>
+              <button type="button" className={actionClass} onClick={start}>Start smooth Soho demo</button>
+            </>
+          )}
+        </div>
+      </main>
+    )
+  }
+
+  return (
+    <main
+      className={screenClass}
+      style={screenStyle}
+      onPointerDown={(event) => {
+        if ((event.target as HTMLElement).closest('button')) return
+        input.current.dragX = event.clientX
+        event.currentTarget.setPointerCapture?.(event.pointerId)
+      }}
+      onPointerMove={(event) => {
+        const x = input.current.dragX
+        if (x === null) return
+        input.current.target = Math.max(-1, Math.min(1, input.current.target - (event.clientX - x) / 150))
+        input.current.dragX = event.clientX
+      }}
+      onPointerUp={() => { input.current.dragX = null }}
+      onPointerCancel={() => { input.current.dragX = null }}
+      onLostPointerCapture={() => { input.current.dragX = null }}
+    >
+      <div ref={sceneRef} data-testid="demo-scene" className="absolute inset-0 will-change-transform" style={{ transform: 'translate3d(0px, 0, 0) scale(1.18)' }}>
+        <img src="/neigh/soho-bignight.png" alt="Soho at night" draggable={false} className="pointer-events-none h-full w-full select-none object-cover" />
+      </div>
+      <div className="pointer-events-none absolute inset-0 bg-gradient-to-b from-black/60 via-transparent to-black/80" />
+      <div className="pointer-events-none absolute inset-x-0 top-0 p-5 pt-[max(1.25rem,env(safe-area-inset-top))]">
+        <BrandMark />
+        <p className="mt-3 text-xs uppercase tracking-[0.15em]">Smooth demo · local scene</p>
+      </div>
+      <div className="absolute inset-x-0 bottom-0 flex flex-col items-center gap-3 px-5 pb-[max(1.25rem,env(safe-area-inset-bottom))]">
+        <button type="button" className={actionClass} onClick={() => setStage('done')}>Enter Coach</button>
+        <button
+          type="button"
+          className="flex h-24 w-24 select-none items-center justify-center rounded-full border border-white/60 bg-black/50 text-xs uppercase tracking-widest active:scale-95 active:bg-[#B3894F]/70"
+          onPointerDown={(event) => {
+            event.stopPropagation()
+            event.currentTarget.setPointerCapture?.(event.pointerId)
+            input.current.walking = true
+          }}
+          onPointerUp={() => { input.current.walking = false }}
+          onPointerCancel={() => { input.current.walking = false }}
+          onLostPointerCapture={() => { input.current.walking = false }}
+        >Hold to walk</button>
+        <p className="text-xs text-white/80">Tilt or drag to look · Hold to move closer</p>
+        <button type="button" className="min-h-11 px-5 text-xs underline" onClick={() => {
+          input.current.neutral = null
+          input.current.target = 0
+        }}>Recenter tilt</button>
+      </div>
+    </main>
+  )
+}
+
 export default function Play() {
+  return new URLSearchParams(window.location.search).get('demo') === '1' ? <SmoothDemo /> : <LivePlay />
+}
+
+function LivePlay() {
   const [stage, setStage] = useState<PlayStage>('enter')
   const [questionStepKey, setQuestionStepKey] = useState(0)
   const [sessionId, setSessionId] = useState('')
