@@ -246,6 +246,9 @@ function Street({
 }) {
   const videoRef = useRef<HTMLVideoElement>(null)
   const worldRef = useRef<WorldHandle | null>(null)
+  const lookRef = useRef<'left' | 'right' | 'idle'>('idle')
+  const neutralTiltRef = useRef<number | null>(null)
+  const fallbackRef = useRef<HTMLDivElement>(null)
   const walkStartedRef = useRef<number | null>(null)
   const swipeStartedRef = useRef<number | null>(null)
   const [reactorDisabled] = useState(() => localStorage.getItem('coach_no_reactor') === '1')
@@ -253,7 +256,6 @@ function Street({
   const [fallback, setFallback] = useState(reactorDisabled)
   const [worldError, setWorldError] = useState('')
   const [latency, setLatency] = useState<number | null>(null)
-  const [parallax, setParallax] = useState(0)
   const [enterReady, setEnterReady] = useState(false)
   const [retry, setRetry] = useState(0)
   const [typedLength, setTypedLength] = useState(0)
@@ -314,6 +316,8 @@ function Street({
           return
         }
         worldRef.current = world
+        world.look(lookRef.current)
+        if (walkStartedRef.current !== null) world.move('forward')
         steerTimer = window.setInterval(() => {
           world.steer(`${session.street_prompt}, the Coach store glowing ahead, closer`)
         }, 8_000)
@@ -336,21 +340,35 @@ function Street({
     }
   }, [jwt, reactorDisabled, retry, session.anchor_url, session.street_prompt, tokenSettled])
 
+  const recenterTilt = useCallback(() => {
+    neutralTiltRef.current = null
+    lookRef.current = 'idle'
+    worldRef.current?.look('idle')
+  }, [])
+
   useEffect(() => {
-    let currentLook: 'left' | 'right' | 'idle' = 'idle'
-    let currentWorld: WorldHandle | null = null
+    let frame = 0
+    let parallax = 0
     const orient = (event: DeviceOrientationEvent) => {
-      const gamma = event.gamma ?? 0
-      setParallax(Math.max(-1, Math.min(1, gamma / 30)))
-      const desired = gamma > 8 ? 'right' : gamma < -8 ? 'left' : 'idle'
-      const world = worldRef.current
-      if (!world || (desired === currentLook && world === currentWorld)) return
-      currentLook = desired
-      currentWorld = world
-      world.look(desired)
+      if (event.gamma === null || !Number.isFinite(event.gamma)) return
+      neutralTiltRef.current ??= event.gamma
+      const gamma = event.gamma - neutralTiltRef.current
+      parallax = Math.max(-1, Math.min(1, gamma / 30))
+      if (!frame) frame = window.requestAnimationFrame(() => {
+        frame = 0
+        if (fallbackRef.current) fallbackRef.current.style.transform = `translateX(${parallax * -10}px) scale(1.08)`
+      })
+      const current = lookRef.current
+      const desired = gamma > 12 ? 'right' : gamma < -12 ? 'left'
+        : current === 'right' && gamma > 4 ? 'right'
+        : current === 'left' && gamma < -4 ? 'left' : 'idle'
+      if (desired === current) return
+      lookRef.current = desired
+      worldRef.current?.look(desired)
     }
     window.addEventListener('deviceorientation', orient)
     return () => {
+      window.cancelAnimationFrame(frame)
       window.removeEventListener('deviceorientation', orient)
     }
   }, [])
@@ -364,7 +382,20 @@ function Street({
     }
   }, [session.id])
 
-  useEffect(() => () => stopWalking(), [stopWalking])
+  useEffect(() => {
+    const stop = () => {
+      stopWalking()
+      recenterTilt()
+      worldRef.current?.strafe('idle')
+    }
+    window.addEventListener('blur', stop)
+    document.addEventListener('visibilitychange', stop)
+    return () => {
+      window.removeEventListener('blur', stop)
+      document.removeEventListener('visibilitychange', stop)
+      stop()
+    }
+  }, [recenterTilt, stopWalking])
 
   const startWalking = () => {
     if (walkStartedRef.current !== null) return
@@ -390,11 +421,12 @@ function Street({
       onTouchEnd={(event) => finishSwipe(event.changedTouches[0]?.clientX ?? 0)}
     >
       <div
+        ref={fallbackRef}
         data-testid="street-fallback"
         className="absolute -inset-8 overflow-hidden transition-transform duration-300"
         style={{
           background: `radial-gradient(circle at 55% 40%, ${COACH.red} 0%, #3a2418 34%, ${COACH.black} 75%)`,
-          transform: `translateX(${parallax * -10}px) scale(1.08)`,
+          transform: 'translateX(0px) scale(1.08)',
         }}
       >
         <div className="absolute inset-0 opacity-30 [background-image:linear-gradient(115deg,transparent_30%,rgba(243,235,221,.28)_50%,transparent_70%)]" />
@@ -482,7 +514,8 @@ function Street({
         >
           Hold to walk
         </button>
-        <p className="text-[10px] uppercase tracking-[0.2em] text-white/60">Tilt to look · Swipe to strafe</p>
+        <p className="text-[10px] uppercase tracking-[0.2em] text-white/60">Tilt gently to look · Swipe to strafe</p>
+        <button type="button" onClick={recenterTilt} className="min-h-11 px-5 text-xs text-white/70 underline">Recenter tilt</button>
       </div>
     </main>
   )

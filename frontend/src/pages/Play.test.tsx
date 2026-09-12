@@ -3,6 +3,7 @@ import userEvent from '@testing-library/user-event'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import { COACH } from '../data/config'
 import type { Session } from '../lib/api'
+import type { WorldHandle } from '../lib/world'
 import Play, { FilmStage } from './Play'
 
 const mocks = vi.hoisted(() => ({
@@ -222,6 +223,8 @@ describe('Play', () => {
         fireEvent(window, event)
       }
 
+      tilt(0)
+      mocks.look.mockClear()
       tilt(20)
       expect(mocks.look).toHaveBeenLastCalledWith('right')
       tilt(21)
@@ -235,6 +238,59 @@ describe('Play', () => {
       expect(mocks.look.mock.calls).toEqual([['right'], ['idle'], ['left'], ['idle']])
     } finally {
       vi.useRealTimers()
+    }
+  })
+
+  it('calibrates the live tilt and does not chatter around the turn threshold', async () => {
+    render(<Play />)
+    await reachStreet()
+    const tilt = (gamma: number) => {
+      const event = new Event('deviceorientation')
+      Object.defineProperty(event, 'gamma', { value: gamma })
+      fireEvent(window, event)
+    }
+
+    tilt(15)
+    expect(mocks.look).not.toHaveBeenCalledWith('right')
+    mocks.look.mockClear()
+    for (const gamma of [35, 24, 22, 25, 23, 15, -5, 6, 8, 5, 7, 15]) tilt(gamma)
+    expect(mocks.look.mock.calls).toEqual([['right'], ['idle'], ['left'], ['idle']])
+    tilt(35)
+    fireEvent.click(screen.getByRole('button', { name: 'Recenter tilt' }))
+    expect(mocks.look).toHaveBeenLastCalledWith('idle')
+    tilt(35)
+    expect(mocks.look).toHaveBeenLastCalledWith('idle')
+  })
+
+  it.each([false, true])('keeps the latest held controls during connection (released: %s)', async (released) => {
+    let connected!: (world: WorldHandle) => void
+    mocks.openWorld.mockImplementationOnce(() => new Promise<WorldHandle>((resolve) => { connected = resolve }))
+    render(<Play />)
+    await reachStreet()
+    const tilt = (gamma: number) => {
+      const event = new Event('deviceorientation')
+      Object.defineProperty(event, 'gamma', { value: gamma })
+      fireEvent(window, event)
+    }
+    tilt(0)
+    tilt(20)
+    const walk = screen.getByRole('button', { name: 'Hold to walk' })
+    Object.defineProperty(walk, 'setPointerCapture', { value: vi.fn() })
+    fireEvent.pointerDown(walk, { pointerId: 1 })
+    if (released) {
+      fireEvent.pointerUp(walk, { pointerId: 1 })
+      tilt(0)
+    }
+    await act(async () => connected({ move: mocks.move, look: mocks.look, strafe: mocks.strafe, steer: mocks.steer, close: mocks.close }))
+    if (released) {
+      expect(mocks.move).not.toHaveBeenCalledWith('forward')
+      expect(mocks.look).not.toHaveBeenCalledWith('right')
+    } else {
+      expect(mocks.move).toHaveBeenLastCalledWith('forward')
+      expect(mocks.look).toHaveBeenLastCalledWith('right')
+      fireEvent.blur(window)
+      expect(mocks.move).toHaveBeenLastCalledWith('idle')
+      expect(mocks.look).toHaveBeenLastCalledWith('idle')
     }
   })
 

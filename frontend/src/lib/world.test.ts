@@ -32,6 +32,23 @@ describe('openWorld', () => {
     vi.unstubAllGlobals()
   })
 
+  it('sets a gentle rotation speed before starting the live world', async () => {
+    mocks.uploadFile.mockResolvedValue({ id: 'anchor' })
+    await openWorld({
+      jwt: 'jwt-1',
+      anchorUrl: '/anchor.png',
+      prompt: 'London street',
+      videoEl: document.createElement('video'),
+    })
+
+    expect(mocks.sendCommand.mock.calls).toEqual([
+      ['set_image', { image: { id: 'anchor' } }],
+      ['set_prompt', { prompt: 'London street' }],
+      ['set_rotation_speed_deg', { rotation_speed_deg: 1 }],
+      ['start', {}],
+    ])
+  })
+
   it('disconnects and rethrows when setup fails after connecting', async () => {
     await expect(openWorld({
       jwt: 'jwt-1',
