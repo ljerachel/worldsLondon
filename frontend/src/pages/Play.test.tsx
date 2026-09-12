@@ -1,8 +1,11 @@
-import { fireEvent, render, screen, waitFor } from '@testing-library/react'
+import { StrictMode } from 'react'
+import { act, fireEvent, render, screen, waitFor } from '@testing-library/react'
 import userEvent from '@testing-library/user-event'
-import { beforeEach, describe, expect, it, vi } from 'vitest'
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import { COACH } from '../data/config'
 import type { Session } from '../lib/api'
+import type { ImmersiveWorldProps } from '../components/ImmersiveWorld'
+import { WorldCleanupError } from '../lib/world'
 import Play from './Play'
 
 const mocks = vi.hoisted(() => ({
@@ -19,6 +22,7 @@ const mocks = vi.hoisted(() => ({
   look: vi.fn(),
   steer: vi.fn(),
   close: vi.fn(),
+  retryResult: vi.fn(),
 }))
 
 vi.mock('../lib/api', () => ({
@@ -33,11 +37,15 @@ vi.mock('../lib/api', () => ({
   },
 }))
 
-vi.mock('../lib/world', () => ({ openWorld: mocks.openWorld }))
+vi.mock('../lib/world', async (importOriginal) => ({
+  ...await importOriginal<typeof import('../lib/world')>(),
+  openWorld: mocks.openWorld,
+}))
 
 vi.mock('../components/ImmersiveWorld', () => ({
-  default: ({ jwt, onViewProduct }: { jwt: string | null; onViewProduct: (product: 'tabby' | 'brooklyn') => void }) => (
+  default: ({ jwt, onViewProduct, onRetryToken }: ImmersiveWorldProps) => (
     <section data-testid="immersive-world" data-jwt={jwt ?? 'fallback'}>
+      <button type="button" onClick={() => { void onRetryToken?.().then(mocks.retryResult) }}>Retry live garden</button>
       <button type="button" onClick={() => onViewProduct('tabby')}>Explore Tabby</button>
       <button type="button" onClick={() => onViewProduct('brooklyn')}>Explore Brooklyn</button>
     </section>
@@ -84,9 +92,26 @@ async function reachPortal() {
   return { user, portal: await screen.findByLabelText('Find Your Courage portal') }
 }
 
+function deferred<T>() {
+  let resolve!: (value: T) => void
+  let reject!: (error: Error) => void
+  const promise = new Promise<T>((res, rej) => { resolve = res; reject = rej })
+  return { promise, resolve, reject }
+}
+
+const streetHandle = {
+  move: mocks.move,
+  strafe: mocks.strafe,
+  look: mocks.look,
+  steer: mocks.steer,
+  close: mocks.close,
+}
+
 describe('Play', () => {
+  afterEach(() => vi.useRealTimers())
+
   beforeEach(() => {
-    vi.clearAllMocks()
+    vi.resetAllMocks()
     localStorage.clear()
     mocks.createSession.mockResolvedValue({ id: 'session-1' })
     mocks.getImmersiveWorld.mockResolvedValue({ world_id: null })
@@ -95,13 +120,7 @@ describe('Play', () => {
       .mockResolvedValue({ jwt: 'immersive-jwt' })
     mocks.sendAnswers.mockResolvedValue(session)
     mocks.sendEvent.mockResolvedValue({ ok: true })
-    mocks.openWorld.mockResolvedValue({
-      move: mocks.move,
-      strafe: mocks.strafe,
-      look: mocks.look,
-      steer: mocks.steer,
-      close: mocks.close,
-    })
+    mocks.openWorld.mockResolvedValue(streetHandle)
     mocks.close.mockResolvedValue(undefined)
   })
 
@@ -115,7 +134,7 @@ describe('Play', () => {
     expect(screen.getByRole('main')).toHaveStyle({ backgroundColor: COACH.black })
   })
 
-  it('keeps the questions and street, then closes LingBot before mounting the portal', async () => {
+  it('keeps the questions and street, then shuts down LingBot alongside the muted portal', async () => {
     render(<Play />)
     const { portal } = await reachPortal()
 
@@ -128,10 +147,147 @@ describe('Play', () => {
     })
     expect(mocks.sendEvent).toHaveBeenCalledWith('session-1', 'street_enter')
     expect(mocks.close).toHaveBeenCalledOnce()
-    expect(mocks.close.mock.invocationCallOrder[0]).toBeLessThan(mocks.reactorToken.mock.invocationCallOrder[1])
     expect(portal).toHaveAttribute('src', '/immersive/portal.mp4')
     expect(portal).toHaveAttribute('controls')
+    expect(portal).toHaveAttribute('autoplay')
+    expect((portal as HTMLVideoElement).muted).toBe(true)
     expect(mocks.reactorToken).toHaveBeenCalledTimes(2)
+  })
+
+  it.each([false, true])('shows the portal during a pending open and waits for one close (StrictMode: %s)', async (strict) => {
+    const opening = deferred<typeof streetHandle>()
+    const closing = deferred<void>()
+    mocks.openWorld.mockReturnValue(opening.promise)
+    mocks.close.mockReturnValue(closing.promise)
+    const { unmount } = render(strict ? <StrictMode><Play /></StrictMode> : <Play />)
+    const { portal } = await reachPortal()
+
+    expect(mocks.openWorld).toHaveBeenCalledOnce()
+    expect(mocks.close).not.toHaveBeenCalled()
+    expect(mocks.reactorToken).toHaveBeenCalledTimes(strict ? 3 : 2)
+    fireEvent.ended(portal)
+    expect(screen.queryByTestId('immersive-world')).not.toBeInTheDocument()
+
+    await act(async () => opening.resolve(streetHandle))
+    expect(mocks.close).toHaveBeenCalledOnce()
+    expect(screen.getByLabelText('Find Your Courage portal')).toBe(portal)
+    expect(screen.queryByTestId('immersive-world')).not.toBeInTheDocument()
+
+    await act(async () => closing.resolve())
+    expect(screen.getByTestId('immersive-world')).toHaveAttribute('data-jwt', 'immersive-jwt')
+    unmount()
+    expect(mocks.close).toHaveBeenCalledOnce()
+  })
+
+  it.each(['open', 'close', 'token'] as const)('offers exact products after a pending %s times out without bypassing cleanup on retry', async (pending) => {
+    const opening = deferred<typeof streetHandle>()
+    const closing = deferred<void>()
+    const token = deferred<{ jwt: string }>()
+    if (pending === 'open') mocks.openWorld.mockReturnValue(opening.promise)
+    if (pending === 'close') mocks.close.mockReturnValue(closing.promise)
+    render(<Play />)
+    await reachStreet()
+    if (pending === 'token') mocks.reactorToken.mockReturnValue(token.promise)
+    vi.useFakeTimers()
+    fireEvent.click(screen.getByRole('button', { name: 'Enter Coach' }))
+    const portal = screen.getByLabelText('Find Your Courage portal')
+    fireEvent.ended(portal)
+    await act(async () => { await vi.advanceTimersByTimeAsync(7_999) })
+    expect(screen.queryByTestId('immersive-world')).not.toBeInTheDocument()
+    await act(async () => { await vi.advanceTimersByTimeAsync(1) })
+
+    expect(screen.getByTestId('immersive-world')).toHaveAttribute('data-jwt', 'fallback')
+    fireEvent.click(screen.getByRole('button', { name: 'Explore Tabby' }))
+    expect(screen.getByRole('dialog')).toBeInTheDocument()
+    fireEvent.click(screen.getByRole('button', { name: 'Close product view' }))
+    if (pending !== 'token') {
+      await act(async () => fireEvent.click(screen.getByRole('button', { name: 'Retry live garden' })))
+      expect(mocks.retryResult).toHaveBeenLastCalledWith(null)
+      expect(mocks.reactorToken).toHaveBeenCalledTimes(2)
+    }
+    await act(async () => {
+      opening.resolve(streetHandle)
+      closing.resolve()
+      token.resolve({ jwt: 'late-jwt' })
+    })
+    expect(screen.getByTestId('immersive-world')).toHaveAttribute('data-jwt', 'fallback')
+    expect(mocks.close).toHaveBeenCalledOnce()
+    mocks.reactorToken.mockResolvedValue({ jwt: 'retry-jwt' })
+    await act(async () => fireEvent.click(screen.getByRole('button', { name: 'Retry live garden' })))
+    expect(mocks.retryResult).toHaveBeenLastCalledWith('retry-jwt')
+    fireEvent.click(screen.getByRole('button', { name: 'Explore Tabby' }))
+    expect(screen.getByRole('dialog')).toBeInTheDocument()
+  })
+
+  it.each(['open', 'close'] as const)('keeps live entry and retry blocked when %s cleanup fails', async (failure) => {
+    if (failure === 'open') mocks.openWorld.mockRejectedValue(new WorldCleanupError('disconnect failed'))
+    else mocks.close.mockRejectedValue(new Error('disconnect failed'))
+    render(<Play />)
+    const user = await reachStreet()
+    if (failure === 'open') {
+      await user.click(await screen.findByRole('button', { name: 'Retry live street' }))
+      expect(mocks.openWorld).toHaveBeenCalledOnce()
+    }
+    await user.click(screen.getByRole('button', { name: 'Enter Coach' }))
+    fireEvent.ended(await screen.findByLabelText('Find Your Courage portal'))
+    expect(await screen.findByTestId('immersive-world')).toHaveAttribute('data-jwt', 'fallback')
+    await user.click(screen.getByRole('button', { name: 'Retry live garden' }))
+    expect(mocks.retryResult).toHaveBeenLastCalledWith(null)
+    expect(mocks.reactorToken).toHaveBeenCalledTimes(2)
+    expect(mocks.openWorld).toHaveBeenCalledOnce()
+    expect(mocks.close).toHaveBeenCalledTimes(failure === 'open' ? 0 : 1)
+  })
+
+  it('closes a late street instance once after unmount without advancing the portal', async () => {
+    const opening = deferred<typeof streetHandle>()
+    mocks.openWorld.mockReturnValue(opening.promise)
+    const { unmount } = render(<Play />)
+    const { portal } = await reachPortal()
+    fireEvent.ended(portal)
+    unmount()
+    await act(async () => opening.resolve(streetHandle))
+    expect(mocks.close).toHaveBeenCalledOnce()
+    expect(mocks.sendEvent.mock.calls.filter(([, type]) => type === 'immersive_enter')).toHaveLength(0)
+  })
+
+  it('closes a pending street open once when unmounted without entering the store', async () => {
+    const opening = deferred<typeof streetHandle>()
+    mocks.openWorld.mockReturnValue(opening.promise)
+    const { unmount } = render(<Play />)
+    await reachStreet()
+    expect(mocks.openWorld).toHaveBeenCalledOnce()
+    unmount()
+    await act(async () => opening.resolve(streetHandle))
+    expect(mocks.close).toHaveBeenCalledOnce()
+    expect(mocks.reactorToken).toHaveBeenCalledOnce()
+    expect(mocks.sendEvent.mock.calls.filter(([, type]) => type === 'store_enter')).toHaveLength(0)
+  })
+
+  it('does not open a late-token street after the portal is already mounted', async () => {
+    const token = deferred<{ jwt: string }>()
+    mocks.reactorToken.mockReset()
+    mocks.reactorToken.mockReturnValueOnce(token.promise).mockResolvedValue({ jwt: 'immersive-jwt' })
+    render(<Play />)
+    const { portal } = await reachPortal()
+    expect(mocks.openWorld).not.toHaveBeenCalled()
+    await act(async () => token.resolve({ jwt: 'late-street-jwt' }))
+    fireEvent.ended(portal)
+    expect(await screen.findByTestId('immersive-world')).toHaveAttribute('data-jwt', 'immersive-jwt')
+    expect(mocks.openWorld).not.toHaveBeenCalled()
+    expect(mocks.close).not.toHaveBeenCalled()
+    expect(mocks.reactorToken).toHaveBeenCalledTimes(2)
+  })
+
+  it('allows a street retry after an opening error whose cleanup succeeded', async () => {
+    mocks.openWorld.mockRejectedValueOnce(new Error('connect failed'))
+    render(<Play />)
+    const user = await reachStreet()
+    await user.click(await screen.findByRole('button', { name: 'Retry live street' }))
+    await waitFor(() => expect(mocks.openWorld).toHaveBeenCalledTimes(2))
+    await user.click(screen.getByRole('button', { name: 'Enter Coach' }))
+    fireEvent.ended(await screen.findByLabelText('Find Your Courage portal'))
+    expect(await screen.findByTestId('immersive-world')).toHaveAttribute('data-jwt', 'immersive-jwt')
+    expect(mocks.close).toHaveBeenCalledOnce()
   })
 
   it('enters the immersive world from the exact portal and completes with the selected bag', async () => {

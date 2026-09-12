@@ -1,5 +1,5 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
-import { openWorld } from './world'
+import { openWorld, WorldCleanupError } from './world'
 
 const mocks = vi.hoisted(() => ({
   connect: vi.fn(),
@@ -30,6 +30,37 @@ describe('openWorld', () => {
 
   afterEach(() => {
     vi.unstubAllGlobals()
+  })
+
+  it('distinguishes failed cleanup from a safely disconnected setup error', async () => {
+    mocks.disconnect.mockRejectedValue(new Error('disconnect failed'))
+    await expect(openWorld({
+      jwt: 'jwt-1',
+      anchorUrl: '/anchor.png',
+      prompt: 'London street',
+      videoEl: document.createElement('video'),
+    })).rejects.toBeInstanceOf(WorldCleanupError)
+    expect(mocks.disconnect).toHaveBeenCalledOnce()
+  })
+
+  it('keeps a failed open pending until its disconnect is confirmed', async () => {
+    let finishDisconnect!: () => void
+    mocks.connect.mockRejectedValue(new Error('connect failed'))
+    mocks.disconnect.mockReturnValue(new Promise<void>((resolve) => { finishDisconnect = resolve }))
+    const settled = vi.fn()
+    const opening = openWorld({
+      jwt: 'jwt-1',
+      anchorUrl: '/anchor.png',
+      prompt: 'London street',
+      videoEl: document.createElement('video'),
+    })
+    void opening.then(settled, settled)
+    await Promise.resolve()
+    expect(mocks.disconnect).toHaveBeenCalledOnce()
+    expect(settled).not.toHaveBeenCalled()
+    finishDisconnect()
+    await expect(opening).rejects.toThrow('connect failed')
+    expect(mocks.disconnect).toHaveBeenCalledOnce()
   })
 
   it('disconnects and rethrows when setup fails after connecting', async () => {

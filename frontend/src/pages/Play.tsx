@@ -7,7 +7,7 @@ import { PORTAL_VIDEO_URL, PRODUCTS } from '../data/products'
 import type { ProductKey } from '../data/products'
 import { api } from '../lib/api'
 import type { ImmersiveWorldRecord, Session } from '../lib/api'
-import { openWorld } from '../lib/world'
+import { openWorld, WorldCleanupError } from '../lib/world'
 import type { WorldHandle } from '../lib/world'
 
 export type PlayStage = 'enter' | 'questions' | 'street' | 'portal' | 'immersive' | 'product' | 'complete'
@@ -224,12 +224,13 @@ function Street({
   session: Session
   jwt: string | null
   tokenSettled: boolean
-  onEnterStore: () => void
+  onEnterStore: (shutdown: Promise<boolean>) => void
   onRetryToken: () => void
 }) {
   const videoRef = useRef<HTMLVideoElement>(null)
   const worldRef = useRef<WorldHandle | null>(null)
-  const worldOpeningRef = useRef<Promise<void>>(Promise.resolve())
+  const shutdownRef = useRef<() => Promise<boolean>>(() => Promise.resolve(true))
+  const enteringStoreRef = useRef(false)
   const walkStartedRef = useRef<number | null>(null)
   const swipeStartedRef = useRef<number | null>(null)
   const [reactorDisabled] = useState(() => localStorage.getItem('coach_no_reactor') === '1')
@@ -269,17 +270,22 @@ function Street({
 
   useEffect(() => {
     let cancelled = false
-    let fallbackTimer = 0
     let steerTimer = 0
+    let world: WorldHandle | null = null
+    let cleanupSafe = true
+    let shutdownPromise: Promise<boolean> | null = null
+    const previousShutdown = shutdownRef.current()
 
-    if (reactorDisabled || !jwt) return
+    if (reactorDisabled || !jwt || enteringStoreRef.current) return
 
-    fallbackTimer = window.setTimeout(() => setFallback(true), 8_000)
+    const fallbackTimer = window.setTimeout(() => setFallback(true), 8_000)
 
     const connect = async () => {
       try {
-        if (!videoRef.current) return
-        const world = await openWorld({
+        cleanupSafe = await previousShutdown
+        if (!cleanupSafe) throw new WorldCleanupError('Street cleanup is unresolved')
+        if (cancelled || !videoRef.current) return
+        world = await openWorld({
           jwt,
           anchorUrl: session.anchor_url,
           prompt: session.street_prompt,
@@ -294,31 +300,40 @@ function Street({
             if (!cancelled) setLatency(Math.round(ms))
           },
         })
-        if (cancelled) {
-          await world.close()
-          return
-        }
+        if (cancelled) return
         worldRef.current = world
         steerTimer = window.setInterval(() => {
-          world.steer(`${session.street_prompt}, the Coach store glowing ahead, closer`)
+          world?.steer(`${session.street_prompt}, the Coach store glowing ahead, closer`)
         }, 8_000)
-      } catch {
+      } catch (error) {
+        if (error instanceof WorldCleanupError) cleanupSafe = false
         if (!cancelled) {
           setFallback(true)
           setWorldError('The live street is taking a different route.')
         }
       }
     }
-    worldOpeningRef.current = connect()
-
-    return () => {
+    const opening = connect()
+    const shutdown = () => {
       cancelled = true
       window.clearTimeout(fallbackTimer)
       window.clearInterval(steerTimer)
-      const world = worldRef.current
-      worldRef.current = null
-      if (world) void world.close()
+      if (worldRef.current === world) worldRef.current = null
+      shutdownPromise ??= opening.then(async () => {
+        if (world) {
+          try {
+            await world.close()
+          } catch {
+            return false
+          }
+        }
+        return cleanupSafe
+      })
+      return shutdownPromise
     }
+    shutdownRef.current = shutdown
+
+    return () => { void shutdown() }
   }, [jwt, reactorDisabled, retry, session.anchor_url, session.street_prompt, tokenSettled])
 
   useEffect(() => {
@@ -361,15 +376,12 @@ function Street({
     worldRef.current?.move('forward')
   }
 
-  const enterStore = async () => {
-    if (enteringStore) return
+  const enterStore = () => {
+    if (enteringStoreRef.current) return
+    enteringStoreRef.current = true
     setEnteringStore(true)
     stopWalking()
-    await worldOpeningRef.current
-    const world = worldRef.current
-    worldRef.current = null
-    if (world) await world.close().catch(() => undefined)
-    onEnterStore()
+    onEnterStore(shutdownRef.current())
   }
 
   const finishSwipe = (x: number) => {
@@ -490,14 +502,17 @@ function Street({
 }
 
 function Portal({
+  shutdown,
   onReady,
 }: {
+  shutdown: Promise<boolean>
   onReady: (jwt: string | null, worldPromise: Promise<ImmersiveWorldRecord>) => void
 }) {
   const [canEnter, setCanEnter] = useState(false)
   const [token, setToken] = useState<string | null>(null)
   const [tokenSettled, setTokenSettled] = useState(false)
   const enteredRef = useRef(false)
+  const mountedRef = useRef(false)
   const tokenRequestRef = useRef<Promise<string | null>>(Promise.resolve(null))
   const worldRequestRef = useRef<Promise<ImmersiveWorldRecord>>(
     Promise.resolve({ world_id: null }),
@@ -505,27 +520,37 @@ function Portal({
 
   useEffect(() => {
     let cancelled = false
+    mountedRef.current = true
     const timer = window.setTimeout(() => setCanEnter(true), 3_000)
+    let deadline = 0
     worldRequestRef.current = api.getImmersiveWorld().catch(() => ({ world_id: null }))
-    tokenRequestRef.current = api.reactorToken()
-      .then(({ jwt }) => {
-        if (!cancelled) setToken(jwt)
-        return jwt
-      })
-      .catch(() => null)
-      .finally(() => {
-        if (!cancelled) setTokenSettled(true)
-      })
+    const tokenRequest = api.reactorToken().then(({ jwt }) => jwt).catch(() => null)
+    tokenRequestRef.current = Promise.race([
+      shutdown.then(async (closed) => closed ? await tokenRequest : null).catch(() => null),
+      new Promise<null>((resolve) => {
+        deadline = window.setTimeout(() => resolve(null), 8_000)
+      }),
+    ]).then((jwt) => {
+      window.clearTimeout(deadline)
+      if (!cancelled) {
+        setToken(jwt)
+        setTokenSettled(true)
+      }
+      return jwt
+    })
     return () => {
       cancelled = true
+      mountedRef.current = false
       window.clearTimeout(timer)
+      window.clearTimeout(deadline)
     }
-  }, [])
+  }, [shutdown])
 
   const enterWorld = async () => {
     if (enteredRef.current) return
     enteredRef.current = true
-    onReady(await tokenRequestRef.current, worldRequestRef.current)
+    const jwt = await tokenRequestRef.current
+    if (mountedRef.current) onReady(jwt, worldRequestRef.current)
   }
 
   return (
@@ -534,6 +559,7 @@ function Portal({
         aria-label="Find Your Courage portal"
         src={PORTAL_VIDEO_URL}
         autoPlay
+        muted
         playsInline
         controls
         onEnded={enterWorld}
@@ -594,6 +620,8 @@ export default function Play() {
   const [selectedProduct, setSelectedProduct] = useState<ProductKey | null>(null)
   const [loading, setLoading] = useState(false)
   const [entryError, setEntryError] = useState('')
+  const [streetShutdown, setStreetShutdown] = useState<Promise<boolean>>(() => Promise.resolve(false))
+  const streetClosedRef = useRef(false)
   const immersiveEnteredRef = useRef(false)
   const worldStartedRef = useRef<number | null>(null)
   const worldTimeSentRef = useRef(false)
@@ -607,6 +635,7 @@ export default function Play() {
   }, [])
 
   const retryImmersiveToken = useCallback(async () => {
+    if (!streetClosedRef.current) return null
     try {
       const { jwt } = await api.reactorToken()
       setImmersiveJwt(jwt)
@@ -678,7 +707,9 @@ export default function Play() {
         jwt={streetJwt}
         tokenSettled={streetTokenSettled}
         onRetryToken={fetchStreetToken}
-        onEnterStore={() => {
+        onEnterStore={(shutdown) => {
+          setStreetShutdown(shutdown)
+          void shutdown.then((closed) => { streetClosedRef.current = closed })
           setStage('portal')
           void api.sendEvent(session.id, 'store_enter').catch(() => undefined)
         }}
@@ -689,6 +720,7 @@ export default function Play() {
   if (stage === 'portal') {
     return (
       <Portal
+        shutdown={streetShutdown}
         onReady={(jwt, worldPromise) => {
           setImmersiveJwt(jwt)
           setImmersiveWorldPromise(worldPromise)
