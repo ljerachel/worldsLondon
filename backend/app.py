@@ -29,8 +29,8 @@ image = (
     modal.Image.debian_slim()
     .apt_install("ffmpeg")
     .pip_install(
-        "fastapi[standard]", "reactor-sdk", "openai", "httpx",
-        "python-multipart", "numpy", "Pillow",
+        "fastapi[standard]", "reactor-sdk==1.5.1", "httpx", "python-multipart", "numpy",
+        "Pillow",
     )
     .add_local_file("prompts.py", "/root/prompts.py")
     .add_local_file("reactor_utils.py", "/root/reactor_utils.py")
@@ -232,30 +232,9 @@ def get_state():
     return {"sessions": sessions, "counts": counts}
 
 
-_insight_cache = {"at": 0.0, "result": None}
-
-
 @web.post("/api/insight")
 def insight():
-    import json as _json
-
-    import openai
-
-    if time.time() - _insight_cache["at"] < 10 and _insight_cache["result"]:
-        return _insight_cache["result"]
-    sessions = all_sessions()
-    client = openai.OpenAI()
-    resp = client.chat.completions.create(
-        model="gpt-4o-mini",
-        response_format={"type": "json_object"},
-        messages=[
-            {"role": "system", "content": prompts.INSIGHT_SYSTEM},
-            {"role": "user", "content": _json.dumps(sessions)},
-        ],
-    )
-    result = _json.loads(resp.choices[0].message.content)
-    _insight_cache.update(at=time.time(), result=result)
-    return result
+    return prompts.coach_strategy()
 
 
 @web.post("/api/localise")
@@ -315,7 +294,6 @@ def reset():
         except KeyError:
             pass
     state["sessions"] = []
-    _insight_cache.update(at=0.0, result=None)
     return {"ok": True}
 
 

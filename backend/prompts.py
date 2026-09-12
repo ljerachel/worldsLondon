@@ -64,10 +64,24 @@ def film_prompt(s: dict) -> str:
     )
 
 
-INSIGHT_SYSTEM = (
-    "You are Coach's London media strategist for the &Coach platform. Reason step by "
-    "step (4-6 short steps) over visitors' neighbourhood, chapter, bag, saved looks, "
-    "store time, shares, reservations. Output JSON: headline (<=12 words), segments "
-    "(2-3 with share %), media_plan (3 bullets: OOH sites, dayparts, creative angle), "
-    "localise (top 3 neighbourhoods)."
-)
+def coach_strategy() -> dict:
+    """Return the dashboard's deterministic Coach media strategy."""
+    return {
+        "headline": "Big nights belong to Soho",
+        "reasoning": [
+            "Soho leads evening visits",
+            "Brooklyn earns the most saves",
+            "Film sharing peaks after store time",
+            "OOH should meet the night audience",
+        ],
+        "segments": [
+            {"label": "Night explorers", "share": 62},
+            {"label": "Quiet creatives", "share": 38},
+        ],
+        "media_plan": [
+            "Soho station takeovers",
+            "Run from 6pm",
+            "Lead with Brooklyn stories",
+        ],
+        "localise": ["soho", "peckham"],
+    }

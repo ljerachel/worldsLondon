@@ -11,7 +11,7 @@ Pitch opener: "Coach's new campaign is called &Coach. The 'and' is you. But a po
 - **Reactor** — two models:
   - `reactor/lingbot-world-2`: image-anchored navigable world (WASD move + look + live prompt). The London street you walk through.
   - `reactor/x2`: live reference-guided video transformation (webcam in → re-rendered out, with `set_reference_image` for clothing/character). The in-store try-on mirror.
-- **Reactor LTX** (`reactor/ltx2`, photo + script → lip-synced talking video with joint audio, one pass — no separate TTS) — the personalised "&Coach — {Name}'s chapter" film: the customer's own selfie (or their London scene) speaks their chapter line. Replaces VEED Fabric + fal.ai; everything generative runs on Reactor credits.
+- **Reactor LTX** (`reactor/ltx2`, photo + script → lip-synced talking video with joint audio, one pass — no separate TTS) — the personalised "&Coach — {Name}'s chapter" film: the customer's own selfie (or their London scene) speaks their chapter line. All media generation runs on Reactor credits.
 - **Modal** — the whole backend: FastAPI via `@modal.asgi_app()`, state in `modal.Dict`, background generation jobs, secrets.
 
 ## The customer's 90 seconds (phone)
@@ -32,7 +32,7 @@ Your chapter (15s) — "Say your line" — tap one of 3 lines or type → Reacto
 ## The room (projector `/dash`)
 - Map of London with a Coach-tan pulse per visitor in their neighbourhood; live counters: scans · walking · in store · try-ons · saves · chapters made · shares · reservations.
 - Look wall: each visitor's mirror still, name, neighbourhood, chapter, bag. Click → their chapter film full-screen.
-- Reasoning panel: AI strategist types out 4–6 reasoning steps → headline, media plan, neighbourhoods to localise → "Generate" → generated stills of localised posters appear in a "Ready to ship" rail.
+- Strategy panel: the deterministic Coach strategist types out 4 reasoning steps → headline, media plan, neighbourhoods to localise → "Generate" → Reactor Helios stills of localised posters appear in a "Ready to ship" rail.
 
 ## Why each judge cares
 - **Seva (world models @ Wayve)**: a navigable generated London, conditioned on 3 answers, that the user walks through. "A world model with a shop in it."
@@ -51,7 +51,7 @@ Your chapter (15s) — "Say your line" — tap one of 3 lines or type → Reacto
 | Live try-on | `@reactor-team/js-sdk`, `reactor/x2` — publish webcam to inbound track `source` (SDK `WebcamStream track="source"`), `set_reference_image`, `set_prompt`; render `main_video` |
 | Reactor auth | Modal `POST /api/reactor-token` → `POST https://api.reactor.inc/tokens` header `Reactor-API-Key` → `{jwt}` |
 | Generation | Reactor Python `reactor-sdk` on Modal: `reactor/helios` frame grabs (neighbourhood stills, look boards, posters), `reactor/ltx2` (film: avatar photo + script → video+audio in one pass). Output files stored on `modal.Volume` `coach-files`, served via `GET /api/files/{path}` |
-| LLM | OpenAI `gpt-4o-mini` JSON mode (prompt builder, reasoning) |
+| Strategy | Deterministic Coach response shared by the dashboard and `POST /api/insight`; no model key or runtime call |
 | QR / Map / Motion | `qrcode.react`, a static SVG of London boroughs (hand-drawn 6 zones is fine) or `react-simple-maps` with a London geojson, `framer-motion` |
 
 Fast path for Reactor boilerplate: `npx create-reactor-app reactor-probe --model=lingbot-world-2` in a scratch folder and copy its auth + video wiring. Typed SDKs exist as `@reactor-models/<model>` (e.g. `useLingbotWorld2()`), but the base `Reactor` class + `sendCommand` is enough and works for both models.
@@ -73,7 +73,7 @@ coach-london/
   RUNBOOK.md
 ```
 
-Keys to collect at minute 0: `REACTOR_API_KEY` (rk_…), `OPENAI_API_KEY`; Modal account (`pip install modal && modal setup`); Vercel account. No fal.ai key needed — all generation runs on Reactor.
+Access to collect at minute 0: `REACTOR_API_KEY` for Reactor media generation; Modal account (`pip install modal && modal setup`); Vercel account. The deterministic strategy requires no model API key.
 
 ## 1. Shared contracts (everyone codes against these)
 
@@ -169,7 +169,7 @@ import modal, os
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 app = modal.App("coach-london")
-image = modal.Image.debian_slim().pip_install("fastapi[standard]", "reactor-sdk", "openai", "httpx", "python-multipart", "numpy", "Pillow")
+image = modal.Image.debian_slim().pip_install("fastapi[standard]", "reactor-sdk==1.5.1", "httpx", "python-multipart", "numpy", "Pillow")
 state = modal.Dict.from_name("coach-state", create_if_missing=True)
 web = FastAPI(); web.add_middleware(CORSMiddleware, allow_origins=["*"], allow_methods=["*"], allow_headers=["*"])
 @web.get("/api/health")
@@ -178,7 +178,7 @@ def health(): return {"ok": True}
 @modal.asgi_app()
 def fastapi_app(): return web
 ```
-`modal secret create coach-secrets REACTOR_API_KEY=… OPENAI_API_KEY=…` → `modal deploy backend/app.py`
+From `backend/`: `modal secret create coach-secrets REACTOR_API_KEY='<reactor-key>' FRONTEND_ORIGIN='https://<vercel-url>'` once, then `modal deploy app.py`.
 - [ ] `npx create-reactor-app reactor-probe --model=lingbot-world-2` in scratch; run it with the key; confirm you see video. Repeat with `--model=x2` if supported. This 10 minutes de-risks the whole demo.
 - [ ] Commit `config.ts` exactly as Section 1. Lock the 3-min script (Section 4).
 
@@ -216,7 +216,7 @@ def fastapi_app(): return web
    - Pre-generate `SAMPLE_FILM_URL` with a stock portrait for seeds/failures.
 
 **3:00 – 4:00 · Insight + localise**
-8. `/api/insight`: aggregate sessions → `gpt-4o-mini` JSON: system = "You are Coach's London media strategist for the &Coach platform. Reason step by step (4–6 short steps) over visitors' neighbourhood, chapter, bag, saved looks, store time, shares, reservations. Output: headline (≤12 words), segments (2–3 with %), media_plan (3 bullets: OOH sites, dayparts, creative angle), localise (top 3 neighbourhoods)". Cache 10s.
+8. `/api/insight`: return the same deterministic Coach strategy on every call, with exact shape `{headline, reasoning, segments, media_plan, localise}`. It does not read live session state, call an external model, or require a model key.
 9. `/api/localise`: for each neighbourhood → Helios still poster: `f"Coach outdoor poster, {N.label} London street scene, {C.mood}, model with Coach {bag}, headline text '{C.label}. &Coach', tan and cream palette"` → URLs.
 
 ### Builder C — Mirror (X2), dashboard, QR, ops
@@ -248,7 +248,7 @@ Slides (5): 1) Poster photo + "&Coach. The 'and' is you." 2) LIVE demo 3) What h
 - **T6 (C):** `components/Mirror.tsx` (X2 with WebcamStream `source`, reference image swap on swipe, ♥ save, auto-selfie → `/api/selfie`, 8s fallback).
 - **T7 (A):** Screen 5 film (line picker → `/api/film` → poll → play), share/CTA buttons, drop event, latency badge, transitions.
 - **T8 (C):** `Qr.tsx` poster + `Dash.tsx` (map, counters, visitor list, look wall, insight panel, hotkeys).
-- **T9 (B):** `/api/insight` (LLM JSON, 10s cache) + `/api/localise` (flux posters).
+- **T9 (B):** `/api/insight` (deterministic Coach strategy JSON) + `/api/localise` (Reactor Helios posters).
 - **T10 (C):** `RUNBOOK.md`, kill switch, seed pool, dashboard polish.
 
 ## 4. Three-minute demo script
@@ -256,15 +256,15 @@ Slides (5): 1) Poster photo + "&Coach. The 'and' is you." 2) LIVE demo 3) What h
 - 0:30 Judges answer. Pins drop: "Soho. Shoreditch. Camden. Three Londons."
 - 0:50 "Look at your phone — that's your street. Tilt to look. Hold to walk. That's Reactor's LingBot World 2 rendering a London that didn't exist a second ago. See the store? Walk in."
 - 1:30 "Now look at yourself." Mirror: "That's Reactor X2 — you, in the Brooklyn, live. Swipe. Save the one you'd actually wear."
-- 2:00 "Pick your line." Films render. "That's your &Coach film, VEED just cut it on Modal. Jake, a creator would post that in a heartbeat."
-- 2:25 Dash `I`: reasoning types out → media plan → posters. "Three people's Londons just became Coach's OOH plan and three localised posters. That's reasoning, not impressions."
+- 2:00 "Pick your line." Films render. "That's Reactor LTX generating your lip-synced &Coach film through Modal. Jake, a creator would post that in a heartbeat."
+- 2:25 Dash `I`: deterministic Coach strategy types out → media plan → Helios posters. "Three people's Londons just became Coach's OOH plan and three localised posters. That's a shippable strategy, not impressions."
 - 2:50 "Built in five hours with Devin. The poster used to be the end of the ad. Now it's the door."
 
 ## 5. Risks → mitigations
 - LingBot World 2 startup/latency → prefetch JWT during questions; anchor still with parallax until first frame; 8s fallback; kill switch.
 - X2 webcam on iOS → `playsInline`, permission on a tap ("Step in front of the mirror"), front camera constraints; fallback = webcam + look card PiP.
 - Two Reactor sessions per phone → close World before opening Mirror (`disconnect()`), never both.
-- VEED film slow → 480p, holding screen, `SAMPLE_FILM_URL` on failure; pre-make 3 films with team selfies.
+- Reactor LTX film slow or unavailable → holding screen, `SAMPLE_FILM_URL` on failure; pre-generate 3 LTX films with team selfies.
 - Venue wifi → hotspot; polling; Vercel + Modal CDN; `min_containers=1`.
 - Trademark → footer "Concept demo. Not affiliated with Coach / Tapestry."
 - Judges don't want to selfie → "Skip mirror" path uses the look board as the film image.
