@@ -57,6 +57,7 @@ export async function openWorld(opts: {
     const ref = await reactor.uploadFile(file)
     await reactor.sendCommand('set_image', { image: ref })
     await reactor.sendCommand('set_prompt', { prompt })
+    await reactor.sendCommand('set_rotation_speed_deg', { rotation_speed_deg: 1 })
     await reactor.sendCommand('start', {})
   } catch (error) {
     try {

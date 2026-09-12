@@ -14,6 +14,10 @@ export type PlayStage = 'enter' | 'questions' | 'street' | 'portal' | 'immersive
 
 type QuestionStep = 'neighbourhood' | 'chapter' | 'bag' | 'name'
 
+type OrientationPermissionEvent = typeof DeviceOrientationEvent & {
+  requestPermission?: () => Promise<'granted' | 'denied'>
+}
+
 const screenClass = 'relative h-[100dvh] w-full overflow-hidden touch-none text-[#F3EBDD]'
 const screenStyle = { backgroundColor: COACH.black }
 const choiceClass =
@@ -231,6 +235,9 @@ function Street({
   const worldRef = useRef<WorldHandle | null>(null)
   const shutdownRef = useRef<() => Promise<boolean>>(() => Promise.resolve(true))
   const enteringStoreRef = useRef(false)
+  const lookRef = useRef<'left' | 'right' | 'idle'>('idle')
+  const neutralTiltRef = useRef<number | null>(null)
+  const fallbackRef = useRef<HTMLDivElement>(null)
   const walkStartedRef = useRef<number | null>(null)
   const swipeStartedRef = useRef<number | null>(null)
   const [reactorDisabled] = useState(() => localStorage.getItem('coach_no_reactor') === '1')
@@ -238,7 +245,6 @@ function Street({
   const [fallback, setFallback] = useState(reactorDisabled)
   const [worldError, setWorldError] = useState('')
   const [latency, setLatency] = useState<number | null>(null)
-  const [parallax, setParallax] = useState(0)
   const [enterReady, setEnterReady] = useState(false)
   const [retry, setRetry] = useState(0)
   const [typedLength, setTypedLength] = useState(0)
@@ -302,14 +308,19 @@ function Street({
         })
         if (cancelled) return
         worldRef.current = world
+        world.look(lookRef.current)
+        if (walkStartedRef.current !== null) world.move('forward')
         steerTimer = window.setInterval(() => {
           world?.steer(`${session.street_prompt}, the Coach store glowing ahead, closer`)
         }, 8_000)
       } catch (error) {
         if (error instanceof WorldCleanupError) cleanupSafe = false
         if (!cancelled) {
+          const failure = error as { status?: number; code?: string } | null
           setFallback(true)
-          setWorldError('The live street is taking a different route.')
+          setWorldError(failure?.status === 429 || failure?.code === 'RATE_LIMITED'
+            ? 'Live world servers are busy. Please try again shortly.'
+            : 'The live street is taking a different route.')
         }
       }
     }
@@ -336,25 +347,35 @@ function Street({
     return () => { void shutdown() }
   }, [jwt, reactorDisabled, retry, session.anchor_url, session.street_prompt, tokenSettled])
 
+  const recenterTilt = useCallback(() => {
+    neutralTiltRef.current = null
+    lookRef.current = 'idle'
+    worldRef.current?.look('idle')
+  }, [])
+
   useEffect(() => {
-    let currentLook: 'left' | 'right' | 'idle' = 'idle'
-    let pendingLook: 'left' | 'right' | 'idle' = 'idle'
-    let lookTimer = 0
+    let frame = 0
+    let parallax = 0
     const orient = (event: DeviceOrientationEvent) => {
-      const gamma = event.gamma ?? 0
-      setParallax(Math.max(-1, Math.min(1, gamma / 30)))
-      const desired = gamma > 8 ? 'right' : gamma < -8 ? 'left' : 'idle'
-      if (desired === currentLook || desired === pendingLook) return
-      pendingLook = desired
-      window.clearTimeout(lookTimer)
-      lookTimer = window.setTimeout(() => {
-        currentLook = pendingLook
-        worldRef.current?.look(currentLook)
-      }, 300)
+      if (event.gamma === null || !Number.isFinite(event.gamma)) return
+      neutralTiltRef.current ??= event.gamma
+      const gamma = event.gamma - neutralTiltRef.current
+      parallax = Math.max(-1, Math.min(1, gamma / 30))
+      if (!frame) frame = window.requestAnimationFrame(() => {
+        frame = 0
+        if (fallbackRef.current) fallbackRef.current.style.transform = `translateX(${parallax * -10}px) scale(1.08)`
+      })
+      const current = lookRef.current
+      const desired = gamma > 12 ? 'right' : gamma < -12 ? 'left'
+        : current === 'right' && gamma > 4 ? 'right'
+        : current === 'left' && gamma < -4 ? 'left' : 'idle'
+      if (desired === current) return
+      lookRef.current = desired
+      worldRef.current?.look(desired)
     }
     window.addEventListener('deviceorientation', orient)
     return () => {
-      window.clearTimeout(lookTimer)
+      window.cancelAnimationFrame(frame)
       window.removeEventListener('deviceorientation', orient)
     }
   }, [])
@@ -368,7 +389,20 @@ function Street({
     }
   }, [session.id])
 
-  useEffect(() => () => stopWalking(), [stopWalking])
+  useEffect(() => {
+    const stop = () => {
+      stopWalking()
+      recenterTilt()
+      worldRef.current?.strafe('idle')
+    }
+    window.addEventListener('blur', stop)
+    document.addEventListener('visibilitychange', stop)
+    return () => {
+      window.removeEventListener('blur', stop)
+      document.removeEventListener('visibilitychange', stop)
+      stop()
+    }
+  }, [recenterTilt, stopWalking])
 
   const startWalking = () => {
     if (walkStartedRef.current !== null) return
@@ -402,11 +436,12 @@ function Street({
       onTouchEnd={(event) => finishSwipe(event.changedTouches[0]?.clientX ?? 0)}
     >
       <div
+        ref={fallbackRef}
         data-testid="street-fallback"
         className="absolute -inset-8 overflow-hidden transition-transform duration-300"
         style={{
           background: `radial-gradient(circle at 55% 40%, ${COACH.red} 0%, #3a2418 34%, ${COACH.black} 75%)`,
-          transform: `translateX(${parallax * -10}px) scale(1.08)`,
+          transform: 'translateX(0px) scale(1.08)',
         }}
       >
         <div className="absolute inset-0 opacity-30 [background-image:linear-gradient(115deg,transparent_30%,rgba(243,235,221,.28)_50%,transparent_70%)]" />
@@ -452,7 +487,8 @@ function Street({
           className="absolute left-5 right-5 top-1/2 rounded-2xl border border-[#B3894F]/60 p-4 text-sm backdrop-blur"
           style={{ backgroundColor: `${COACH.black}b3` }}
         >
-          <p>{statusError} You can keep walking in still mode.</p>
+          <p>{statusError} Showing the street preview, not live video.</p>
+          <a href="/play?demo=1" className="mt-2 flex min-h-11 items-center underline">Use smooth fallback</a>
           <button
             type="button"
             onClick={() => {
@@ -495,7 +531,8 @@ function Street({
         >
           Hold to walk
         </button>
-        <p className="text-[10px] uppercase tracking-[0.2em] text-white/60">Tilt to look · Swipe to strafe</p>
+        <p className="text-[10px] uppercase tracking-[0.2em] text-white/60">Tilt gently to look · Swipe to strafe</p>
+        <button type="button" onClick={recenterTilt} className="min-h-11 px-5 text-xs text-white/70 underline">Recenter tilt</button>
       </div>
     </main>
   )
@@ -605,7 +642,141 @@ function Complete({ session, product }: { session: Session; product: ProductKey 
   )
 }
 
+function SmoothDemo() {
+  const [stage, setStage] = useState<'enter' | 'street' | 'done'>('enter')
+  const sceneRef = useRef<HTMLDivElement>(null)
+  const input = useRef({ target: 0, neutral: null as number | null, walking: false, dragX: null as number | null })
+
+  useEffect(() => {
+    if (stage !== 'street') return
+    input.current = { target: 0, neutral: null, walking: false, dragX: null }
+    let frame = 0
+    let previous = performance.now()
+    let pan = 0
+    let zoom = 1.18
+    const animate = (now: number) => {
+      const dt = Math.max(0, Math.min(50, now - previous))
+      previous = now
+      pan += (input.current.target - pan) * (1 - Math.exp(-dt / 65))
+      if (Math.abs(input.current.target - pan) < 0.001) pan = input.current.target
+      if (input.current.walking) zoom = Math.min(1.65, zoom + dt * 0.000035)
+      if (sceneRef.current) {
+        sceneRef.current.style.transform = `translate3d(${(pan * -Math.min(window.innerWidth * 0.06, 55)).toFixed(3)}px, 0, 0) scale(${zoom.toFixed(5)})`
+      }
+      frame = window.requestAnimationFrame(animate)
+    }
+    const orient = (event: DeviceOrientationEvent) => {
+      if (event.gamma === null || !Number.isFinite(event.gamma) || input.current.dragX !== null) return
+      input.current.neutral ??= event.gamma
+      const tilt = event.gamma - input.current.neutral
+      input.current.target = Math.abs(tilt) < 1 ? 0 : Math.max(-1, Math.min(1, tilt / 25))
+    }
+    const stop = () => {
+      input.current.walking = false
+      input.current.dragX = null
+      previous = performance.now()
+    }
+    frame = window.requestAnimationFrame(animate)
+    window.addEventListener('deviceorientation', orient)
+    window.addEventListener('blur', stop)
+    document.addEventListener('visibilitychange', stop)
+    return () => {
+      window.cancelAnimationFrame(frame)
+      window.removeEventListener('deviceorientation', orient)
+      window.removeEventListener('blur', stop)
+      document.removeEventListener('visibilitychange', stop)
+      stop()
+    }
+  }, [stage])
+
+  const start = () => {
+    const orientation = window.DeviceOrientationEvent as OrientationPermissionEvent | undefined
+    if (orientation?.requestPermission) void orientation.requestPermission().catch(() => 'denied')
+    setStage('street')
+  }
+  const actionClass = 'min-h-14 rounded-full border border-[#B3894F]/70 bg-[#0a0a0a]/80 px-7 py-3 text-sm uppercase tracking-[0.15em]'
+
+  if (stage !== 'street') {
+    return (
+      <main className={`${screenClass} flex items-center justify-center px-7`} style={screenStyle}>
+        <img src="/neigh/soho-bignight.png" alt="" className="absolute inset-0 h-full w-full object-cover opacity-25" />
+        <div className="relative w-full max-w-md text-center">
+          <BrandMark />
+          <p className="mt-5 text-xs uppercase tracking-[0.2em] text-[#B3894F]">Smooth demo · Soho · Big night</p>
+          <h1 className="mt-5 font-serif text-5xl">{stage === 'done' ? 'Your Soho chapter.' : 'One night in Soho.'}</h1>
+          {stage === 'done' ? (
+            <>
+              <img src="/looks/brooklyn-1.png" alt="Brooklyn bag look" className="mx-auto mt-6 max-h-[35dvh] rounded-3xl object-contain" />
+              <p className="my-5">Brooklyn. Your companion for the night.</p>
+              <button type="button" className={actionClass} onClick={start}>Walk again</button>
+            </>
+          ) : (
+            <>
+              <p className="my-6 text-[#F3EBDD]/75">A local pan-and-zoom demo. Tilt or drag to look, hold to move closer. No live generation.</p>
+              <button type="button" className={actionClass} onClick={start}>Start smooth Soho demo</button>
+            </>
+          )}
+        </div>
+      </main>
+    )
+  }
+
+  return (
+    <main
+      className={screenClass}
+      style={screenStyle}
+      onPointerDown={(event) => {
+        if ((event.target as HTMLElement).closest('button')) return
+        input.current.dragX = event.clientX
+        event.currentTarget.setPointerCapture?.(event.pointerId)
+      }}
+      onPointerMove={(event) => {
+        const x = input.current.dragX
+        if (x === null) return
+        input.current.target = Math.max(-1, Math.min(1, input.current.target - (event.clientX - x) / 150))
+        input.current.dragX = event.clientX
+      }}
+      onPointerUp={() => { input.current.dragX = null }}
+      onPointerCancel={() => { input.current.dragX = null }}
+      onLostPointerCapture={() => { input.current.dragX = null }}
+    >
+      <div ref={sceneRef} data-testid="demo-scene" className="absolute inset-0 will-change-transform" style={{ transform: 'translate3d(0px, 0, 0) scale(1.18)' }}>
+        <img src="/neigh/soho-bignight.png" alt="Soho at night" draggable={false} className="pointer-events-none h-full w-full select-none object-cover" />
+      </div>
+      <div className="pointer-events-none absolute inset-0 bg-gradient-to-b from-black/60 via-transparent to-black/80" />
+      <div className="pointer-events-none absolute inset-x-0 top-0 p-5 pt-[max(1.25rem,env(safe-area-inset-top))]">
+        <BrandMark />
+        <p className="mt-3 text-xs uppercase tracking-[0.15em]">Smooth demo · local scene</p>
+      </div>
+      <div className="absolute inset-x-0 bottom-0 flex flex-col items-center gap-3 px-5 pb-[max(1.25rem,env(safe-area-inset-bottom))]">
+        <button type="button" className={actionClass} onClick={() => setStage('done')}>Enter Coach</button>
+        <button
+          type="button"
+          className="flex h-24 w-24 select-none items-center justify-center rounded-full border border-white/60 bg-black/50 text-xs uppercase tracking-widest active:scale-95 active:bg-[#B3894F]/70"
+          onPointerDown={(event) => {
+            event.stopPropagation()
+            event.currentTarget.setPointerCapture?.(event.pointerId)
+            input.current.walking = true
+          }}
+          onPointerUp={() => { input.current.walking = false }}
+          onPointerCancel={() => { input.current.walking = false }}
+          onLostPointerCapture={() => { input.current.walking = false }}
+        >Hold to walk</button>
+        <p className="text-xs text-white/80">Tilt or drag to look · Hold to move closer</p>
+        <button type="button" className="min-h-11 px-5 text-xs underline" onClick={() => {
+          input.current.neutral = null
+          input.current.target = 0
+        }}>Recenter tilt</button>
+      </div>
+    </main>
+  )
+}
+
 export default function Play() {
+  return new URLSearchParams(window.location.search).get('demo') === '1' ? <SmoothDemo /> : <LivePlay />
+}
+
+function LivePlay() {
   const [stage, setStage] = useState<PlayStage>('enter')
   const [questionStepKey, setQuestionStepKey] = useState(0)
   const [sessionId, setSessionId] = useState('')
@@ -649,6 +820,8 @@ export default function Play() {
     if (loading) return
     setLoading(true)
     setEntryError('')
+    const orientation = window.DeviceOrientationEvent as OrientationPermissionEvent | undefined
+    if (orientation?.requestPermission) void orientation.requestPermission().catch(() => 'denied')
     fetchStreetToken()
 
     try {

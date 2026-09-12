@@ -6,6 +6,7 @@ import { COACH } from '../data/config'
 import type { Session } from '../lib/api'
 import type { ImmersiveWorldProps } from '../components/ImmersiveWorld'
 import { WorldCleanupError } from '../lib/world'
+import type { WorldHandle } from '../lib/world'
 import Play from './Play'
 
 const mocks = vi.hoisted(() => ({
@@ -106,6 +107,69 @@ const streetHandle = {
   steer: mocks.steer,
   close: mocks.close,
 }
+
+describe('Smooth demo', () => {
+  beforeEach(() => {
+    vi.clearAllMocks()
+    window.history.replaceState({}, '', '/play?demo=1')
+  })
+
+  afterEach(() => {
+    window.history.replaceState({}, '', '/play')
+    vi.useRealTimers()
+    vi.restoreAllMocks()
+  })
+
+  it('completes the Soho demo without any backend or Reactor requests', async () => {
+    const user = userEvent.setup()
+    render(<Play />)
+    await user.click(screen.getByRole('button', { name: 'Start smooth Soho demo' }))
+    expect(screen.getByText('Smooth demo · local scene')).toBeInTheDocument()
+    expect(screen.getByAltText('Soho at night')).toHaveAttribute('src', '/neigh/soho-bignight.png')
+    await user.click(screen.getByRole('button', { name: 'Enter Coach' }))
+    expect(screen.getByRole('heading', { name: 'Your Soho chapter.' })).toBeInTheDocument()
+    await user.click(screen.getByRole('button', { name: 'Walk again' }))
+    expect(screen.getByRole('button', { name: 'Hold to walk' })).toBeInTheDocument()
+    expect(mocks.createSession).not.toHaveBeenCalled()
+    expect(mocks.reactorToken).not.toHaveBeenCalled()
+    expect(mocks.openWorld).not.toHaveBeenCalled()
+    expect(mocks.sendEvent).not.toHaveBeenCalled()
+  })
+
+  it('smooths tilt locally, zooms only while held, and stops on release or blur', async () => {
+    vi.useFakeTimers()
+    render(<Play />)
+    fireEvent.click(screen.getByRole('button', { name: 'Start smooth Soho demo' }))
+    const scene = screen.getByTestId('demo-scene')
+    const walk = screen.getByRole('button', { name: 'Hold to walk' })
+    const tilt = (gamma: number) => {
+      const event = new Event('deviceorientation')
+      Object.defineProperty(event, 'gamma', { value: gamma })
+      fireEvent(window, event)
+    }
+    tilt(10)
+    tilt(30)
+    await act(async () => vi.advanceTimersByTimeAsync(100))
+    const pan = Number(scene.style.transform.match(/translate3d\(([-\d.]+)px/)?.[1])
+    const zoom = () => Number(scene.style.transform.match(/scale\(([\d.]+)\)/)?.[1])
+    expect(pan).toBeLessThan(0)
+    expect(pan).toBeGreaterThan(-55)
+    expect(zoom()).toBe(1.18)
+    fireEvent.pointerDown(walk, { pointerId: 1 })
+    await act(async () => vi.advanceTimersByTimeAsync(1000))
+    expect(zoom()).toBeGreaterThan(1.2)
+    expect(zoom()).toBeLessThan(1.23)
+    fireEvent.pointerUp(walk, { pointerId: 1 })
+    await act(async () => vi.advanceTimersByTimeAsync(1000))
+    const stopped = scene.style.transform
+    await act(async () => vi.advanceTimersByTimeAsync(500))
+    expect(scene.style.transform).toBe(stopped)
+    fireEvent.pointerDown(walk, { pointerId: 2 })
+    fireEvent.blur(window)
+    await act(async () => vi.advanceTimersByTimeAsync(500))
+    expect(scene.style.transform).toBe(stopped)
+  })
+})
 
 describe('Play', () => {
   afterEach(() => vi.useRealTimers())
@@ -217,6 +281,113 @@ describe('Play', () => {
     expect(mocks.retryResult).toHaveBeenLastCalledWith('retry-jwt')
     fireEvent.click(screen.getByRole('button', { name: 'Explore Tabby' }))
     expect(screen.getByRole('dialog')).toBeInTheDocument()
+  })
+
+  it('requests tilt permission from the entry gesture without requesting camera access', async () => {
+    const requestPermission = vi.fn().mockResolvedValue('granted')
+    const getUserMedia = vi.fn().mockRejectedValue(new Error('Camera access is not part of this journey'))
+    vi.stubGlobal('DeviceOrientationEvent', { requestPermission })
+    vi.stubGlobal('navigator', Object.assign(Object.create(navigator), { mediaDevices: { getUserMedia } }))
+    try {
+      render(<Play />)
+      fireEvent.click(screen.getByRole('button', { name: "Tap to enter Coach's London" }))
+      expect(requestPermission).toHaveBeenCalledOnce()
+      expect(await screen.findByRole('button', { name: 'Soho' })).toBeInTheDocument()
+      expect(getUserMedia).not.toHaveBeenCalled()
+    } finally {
+      vi.unstubAllGlobals()
+    }
+  })
+
+  it('turns immediately and stops on neutral without replaying a stale tilt', async () => {
+    render(<Play />)
+    await reachStreet()
+    vi.useFakeTimers()
+    try {
+      const tilt = (gamma: number) => {
+        const event = new Event('deviceorientation')
+        Object.defineProperty(event, 'gamma', { value: gamma })
+        fireEvent(window, event)
+      }
+
+      tilt(0)
+      mocks.look.mockClear()
+      tilt(20)
+      expect(mocks.look).toHaveBeenLastCalledWith('right')
+      tilt(21)
+      expect(mocks.look).toHaveBeenCalledTimes(1)
+      tilt(0)
+      expect(mocks.look).toHaveBeenLastCalledWith('idle')
+      tilt(-20)
+      expect(mocks.look).toHaveBeenLastCalledWith('left')
+      tilt(0)
+      await act(async () => vi.advanceTimersByTimeAsync(350))
+      expect(mocks.look.mock.calls).toEqual([['right'], ['idle'], ['left'], ['idle']])
+    } finally {
+      vi.useRealTimers()
+    }
+  })
+
+  it('explains live capacity failures and offers the optional smooth fallback', async () => {
+    mocks.openWorld.mockRejectedValueOnce(Object.assign(new Error('no available capacity'), { status: 429 }))
+    render(<Play />)
+    await reachStreet()
+    expect(await screen.findByRole('alert')).toHaveTextContent('Live world servers are busy')
+    expect(screen.getByRole('link', { name: 'Use smooth fallback' })).toHaveAttribute('href', '/play?demo=1')
+    expect(screen.getByRole('button', { name: 'Retry live street' })).toBeInTheDocument()
+  })
+
+  it('calibrates the live tilt and does not chatter around the turn threshold', async () => {
+    render(<Play />)
+    await reachStreet()
+    const tilt = (gamma: number) => {
+      const event = new Event('deviceorientation')
+      Object.defineProperty(event, 'gamma', { value: gamma })
+      fireEvent(window, event)
+    }
+
+    tilt(15)
+    expect(mocks.look).not.toHaveBeenCalledWith('right')
+    mocks.look.mockClear()
+    for (const gamma of [35, 24, 22, 25, 23, 15, -5, 6, 8, 5, 7, 15]) tilt(gamma)
+    expect(mocks.look.mock.calls).toEqual([['right'], ['idle'], ['left'], ['idle']])
+    tilt(35)
+    fireEvent.click(screen.getByRole('button', { name: 'Recenter tilt' }))
+    expect(mocks.look).toHaveBeenLastCalledWith('idle')
+    tilt(35)
+    expect(mocks.look).toHaveBeenLastCalledWith('idle')
+  })
+
+  it.each([false, true])('keeps the latest held controls during connection (released: %s)', async (released) => {
+    let connected!: (world: WorldHandle) => void
+    mocks.openWorld.mockImplementationOnce(() => new Promise<WorldHandle>((resolve) => { connected = resolve }))
+    render(<Play />)
+    await reachStreet()
+    const tilt = (gamma: number) => {
+      const event = new Event('deviceorientation')
+      Object.defineProperty(event, 'gamma', { value: gamma })
+      fireEvent(window, event)
+    }
+    tilt(0)
+    tilt(20)
+    const walk = screen.getByRole('button', { name: 'Hold to walk' })
+    Object.defineProperty(walk, 'setPointerCapture', { value: vi.fn() })
+    fireEvent.pointerDown(walk, { pointerId: 1 })
+    if (released) {
+      fireEvent.pointerUp(walk, { pointerId: 1 })
+      tilt(0)
+    }
+    await act(async () => connected({ move: mocks.move, look: mocks.look, strafe: mocks.strafe, steer: mocks.steer, close: mocks.close }))
+    if (released) {
+      expect(mocks.move).not.toHaveBeenCalledWith('forward')
+      expect(mocks.look).not.toHaveBeenCalledWith('right')
+    } else {
+      expect(mocks.move).toHaveBeenLastCalledWith('forward')
+      expect(mocks.look).toHaveBeenLastCalledWith('right')
+      fireEvent.blur(window)
+      expect(mocks.move).toHaveBeenLastCalledWith('idle')
+      expect(mocks.look).toHaveBeenLastCalledWith('idle')
+    }
   })
 
   it.each(['open', 'close'] as const)('keeps live entry and retry blocked when %s cleanup fails', async (failure) => {
