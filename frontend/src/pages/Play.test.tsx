@@ -151,5 +151,8 @@ describe('Play', () => {
 
     expect(mocks.sendEvent).toHaveBeenCalledWith('session-1', 'store_enter')
     expect(screen.getByTestId('mirror-stage')).toBeInTheDocument()
+
+    await user.click(screen.getByRole('button', { name: 'Continue to your chapter' }))
+    expect(screen.getByTestId('film-stage')).toBeInTheDocument()
   })
 })

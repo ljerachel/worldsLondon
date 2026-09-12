@@ -492,7 +492,7 @@ function Street({
   )
 }
 
-export function MirrorStage({ session, jwt }: MirrorStageProps) {
+export function MirrorStage({ session, jwt, onComplete }: MirrorStageProps) {
   return (
     <section
       data-testid="mirror-stage"
@@ -501,7 +501,7 @@ export function MirrorStage({ session, jwt }: MirrorStageProps) {
       className={screenClass}
       style={screenStyle}
     >
-      <Mirror />
+      <Mirror id={session.id} jwt={jwt} bag={session.bag} onContinue={onComplete} />
     </section>
   )
 }
