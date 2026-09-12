@@ -109,6 +109,7 @@ function Experience({ id, onViewProduct, onSelectProduct, onFallback }: Experien
   const [status, setStatus] = useState<ImmersiveStatus>('connecting')
   const lifecycleStartedRef = useRef(false)
   const mountedRef = useRef(true)
+  const startupTimeoutRef = useRef<number | null>(null)
   const disconnectPromiseRef = useRef<Promise<void> | null>(null)
 
   const disconnectOnce = useCallback(() => {
@@ -118,24 +119,36 @@ function Experience({ id, onViewProduct, onSelectProduct, onFallback }: Experien
     return disconnectPromiseRef.current
   }, [disconnect])
 
+  const clearStartupTimeout = useCallback(() => {
+    if (startupTimeoutRef.current === null) return
+    window.clearTimeout(startupTimeoutRef.current)
+    startupTimeoutRef.current = null
+  }, [])
+
   const failToFallback = useCallback((reason: Exclude<FallbackReason, 'kill-switch'>) => {
     if (!mountedRef.current) return
+    clearStartupTimeout()
     onFallback(reason, disconnectOnce())
-  }, [disconnectOnce, onFallback])
+  }, [clearStartupTimeout, disconnectOnce, onFallback])
 
   useHappyOysterTravelError(() => failToFallback('error'))
 
   useEffect(() => {
     return () => {
       mountedRef.current = false
+      clearStartupTimeout()
       void stop().catch(() => undefined)
       void disconnectOnce()
     }
-  }, [disconnectOnce, stop])
+  }, [clearStartupTimeout, disconnectOnce, stop])
 
   useEffect(() => {
     if (phase !== 'connected' || lifecycleStartedRef.current) return
     lifecycleStartedRef.current = true
+    startupTimeoutRef.current = window.setTimeout(
+      () => failToFallback('timeout'),
+      IMMERSIVE_STREAM_TIMEOUT_MS,
+    )
 
     void (async () => {
       try {
@@ -173,21 +186,15 @@ function Experience({ id, onViewProduct, onSelectProduct, onFallback }: Experien
   }, [attachWorld, createWorld, failToFallback, phase, startTravel])
 
   useEffect(() => {
+    if (streaming || phase === 'ended') clearStartupTimeout()
     if (phase === 'failed') failToFallback('error')
-  }, [failToFallback, phase])
+  }, [clearStartupTimeout, failToFallback, phase, streaming])
 
   const displayedStatus: ImmersiveStatus = streaming
     ? 'streaming'
     : phase === 'ended'
       ? 'ended'
       : status
-
-  useEffect(() => {
-    const timer = window.setTimeout(() => {
-      if (!streaming) failToFallback('timeout')
-    }, IMMERSIVE_STREAM_TIMEOUT_MS)
-    return () => window.clearTimeout(timer)
-  }, [failToFallback, streaming])
 
   const hold = (action: () => Promise<void>) => (event: ReactPointerEvent<HTMLButtonElement>) => {
     event.currentTarget.setPointerCapture?.(event.pointerId)
@@ -258,10 +265,15 @@ function Experience({ id, onViewProduct, onSelectProduct, onFallback }: Experien
 function FallbackExperience({
   id,
   reason,
+  retrying,
   onRetry,
   onViewProduct,
   onSelectProduct,
-}: Omit<ImmersiveWorldProps, 'jwt'> & { reason: FallbackReason; onRetry: () => void }) {
+}: Omit<ImmersiveWorldProps, 'jwt'> & {
+  reason: FallbackReason
+  retrying: boolean
+  onRetry: () => void
+}) {
   return (
     <section data-session-id={id} className="relative h-[100dvh] overflow-hidden bg-[#170b0d] text-[#F3EBDD]">
       <PortalBackground />
@@ -271,7 +283,9 @@ function FallbackExperience({
           The live garden is resting. The exact Tabby and Brooklyn views are still ready to explore.
         </p>
         {reason !== 'kill-switch' && (
-          <button type="button" className={CONTROL_CLASS} onClick={onRetry}>Retry live garden</button>
+          <button type="button" disabled={retrying} className={CONTROL_CLASS} onClick={onRetry}>
+            {retrying ? 'Reconnecting…' : 'Retry live garden'}
+          </button>
         )}
       </div>
       <div className="absolute inset-x-0 bottom-0 bg-gradient-to-t from-black via-black/70 to-transparent px-4 pb-[max(1rem,env(safe-area-inset-bottom))] pt-20">
@@ -286,7 +300,9 @@ export default function ImmersiveWorld(props: ImmersiveWorldProps) {
     reactorKillSwitchEnabled() ? 'kill-switch' : null
   ))
   const [providerKey, setProviderKey] = useState(0)
+  const [retrying, setRetrying] = useState(false)
   const pendingDisconnectRef = useRef<Promise<void>>(Promise.resolve())
+  const retryInFlightRef = useRef(false)
 
   const enterFallback = useCallback((reason: Exclude<FallbackReason, 'kill-switch'>, disconnected: Promise<void>) => {
     pendingDisconnectRef.current = disconnected
@@ -294,9 +310,14 @@ export default function ImmersiveWorld(props: ImmersiveWorldProps) {
   }, [])
 
   const retry = async () => {
+    if (retryInFlightRef.current) return
+    retryInFlightRef.current = true
+    setRetrying(true)
     await pendingDisconnectRef.current
     setFallbackReason(null)
     setProviderKey((key) => key + 1)
+    setRetrying(false)
+    retryInFlightRef.current = false
   }
 
   if (fallbackReason) {
@@ -304,6 +325,7 @@ export default function ImmersiveWorld(props: ImmersiveWorldProps) {
       <FallbackExperience
         id={props.id}
         reason={fallbackReason}
+        retrying={retrying}
         onRetry={retry}
         onViewProduct={props.onViewProduct}
         onSelectProduct={props.onSelectProduct}
