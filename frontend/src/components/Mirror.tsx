@@ -111,9 +111,13 @@ export default function Mirror({ id, jwt, bag, onContinue }: MirrorProps) {
   const outputVideoRef = useRef<HTMLVideoElement>(null)
   const streamRef = useRef<MediaStream | null>(null)
   const disconnectRef = useRef<(() => Promise<void>) | null>(null)
+  const disconnectedRef = useRef(false)
   const stoppedRef = useRef(false)
   const selfieUploadedRef = useRef(false)
+  const savingLooksRef = useRef(new Set<number>())
   const swipeStartRef = useRef<number | null>(null)
+  const [cameraStarted, setCameraStarted] = useState(false)
+  const [sourceReady, setSourceReady] = useState(false)
   const [sourceTrack, setSourceTrack] = useState<MediaStreamTrack | null>(null)
   const [lookIndex, setLookIndex] = useState(0)
   const [savedLooks, setSavedLooks] = useState<number[]>([])
@@ -126,10 +130,19 @@ export default function Mirror({ id, jwt, bag, onContinue }: MirrorProps) {
   const lookLabel = MIRROR_LOOKS[lookIndex]
 
   const registerDisconnect = useCallback((disconnect: (() => Promise<void>) | null) => {
-    disconnectRef.current = disconnect
+    if (disconnect) disconnectRef.current = disconnect
+  }, [])
+  const disconnectX2 = useCallback(async () => {
+    const disconnect = disconnectRef.current
+    if (!disconnect || disconnectedRef.current) return
+    disconnectedRef.current = true
+    await disconnect()
   }, [])
   const handleX2Frame = useCallback(() => setHasX2Frame(true), [])
-  const handleX2Failure = useCallback(() => setReactorFailure(true), [])
+  const handleX2Failure = useCallback(() => {
+    void disconnectX2().catch(() => undefined)
+    setReactorFailure(true)
+  }, [disconnectX2])
 
   const stopCamera = useCallback(() => {
     if (stoppedRef.current) return
@@ -141,6 +154,7 @@ export default function Mirror({ id, jwt, bag, onContinue }: MirrorProps) {
   }, [])
 
   useEffect(() => {
+    if (!cameraStarted) return
     let cancelled = false
     const openCamera = async () => {
       try {
@@ -160,7 +174,10 @@ export default function Mirror({ id, jwt, bag, onContinue }: MirrorProps) {
           await sourceVideoRef.current.play()
         }
       } catch {
-        if (!cancelled) setCameraError(true)
+        if (!cancelled) {
+          setCameraError(true)
+          handleX2Failure()
+        }
       }
     }
     void openCamera()
@@ -168,10 +185,10 @@ export default function Mirror({ id, jwt, bag, onContinue }: MirrorProps) {
       cancelled = true
       stopCamera()
     }
-  }, [stopCamera])
+  }, [cameraStarted, handleX2Failure, stopCamera])
 
   useEffect(() => {
-    if (!sourceTrack || selfieUploadedRef.current) return
+    if (!sourceTrack || !sourceReady || selfieUploadedRef.current) return
     const timer = window.setTimeout(() => {
       const video = sourceVideoRef.current
       if (!video || selfieUploadedRef.current) return
@@ -181,13 +198,17 @@ export default function Mirror({ id, jwt, bag, onContinue }: MirrorProps) {
         .catch(() => undefined)
     }, 3_000)
     return () => window.clearTimeout(timer)
-  }, [id, sourceTrack])
+  }, [id, sourceReady, sourceTrack])
 
   useEffect(() => {
-    if (reactorDisabled || hasX2Frame) return
-    const timer = window.setTimeout(() => setReactorFailure(true), 8_000)
+    if (!cameraStarted || reactorDisabled || hasX2Frame) return
+    const timer = window.setTimeout(handleX2Failure, 8_000)
     return () => window.clearTimeout(timer)
-  }, [hasX2Frame, reactorDisabled])
+  }, [cameraStarted, handleX2Failure, hasX2Frame, reactorDisabled])
+
+  useEffect(() => () => {
+    void disconnectX2().catch(() => undefined)
+  }, [disconnectX2])
 
   const changeLook = (next: number) => {
     const index = (next + MIRROR_LOOKS.length) % MIRROR_LOOKS.length
@@ -204,12 +225,16 @@ export default function Mirror({ id, jwt, bag, onContinue }: MirrorProps) {
   }
 
   const saveLook = async () => {
-    if (savedLooks.includes(lookIndex)) return
+    const index = lookIndex
+    if (savedLooks.includes(index) || savingLooksRef.current.has(index)) return
+    savingLooksRef.current.add(index)
     try {
-      await api.sendEvent(id, 'save', lookIndex)
-      setSavedLooks((looks) => [...looks, lookIndex])
+      await api.sendEvent(id, 'save', index)
+      setSavedLooks((looks) => [...looks, index])
     } catch {
       return
+    } finally {
+      savingLooksRef.current.delete(index)
     }
   }
 
@@ -217,13 +242,33 @@ export default function Mirror({ id, jwt, bag, onContinue }: MirrorProps) {
     if (continuing) return
     setContinuing(true)
     try {
-      await disconnectRef.current?.()
+      await disconnectX2()
     } catch {}
     stopCamera()
     onContinue()
   }
 
   const saved = savedLooks.includes(lookIndex)
+
+  if (!cameraStarted) {
+    return (
+      <main className="relative flex h-[100dvh] w-full items-center justify-center overflow-hidden px-6 text-[#F3EBDD]" style={{ backgroundColor: COACH.black }}>
+        <div className="absolute inset-0 bg-[radial-gradient(circle_at_center,rgba(179,137,79,0.3),transparent_38%)]" />
+        <div className="relative w-full max-w-md text-center">
+          <div className="font-serif text-sm uppercase tracking-[0.32em]">Coach <span className="text-[#B3894F]">&amp;</span> You</div>
+          <h1 className="mt-8 font-serif text-5xl leading-none">Your look awaits.</h1>
+          <button
+            type="button"
+            onClick={() => setCameraStarted(true)}
+            className="mt-10 min-h-14 w-full rounded-full px-6 text-sm font-medium uppercase tracking-[0.18em] transition active:scale-[0.98]"
+            style={{ backgroundColor: COACH.cream, color: COACH.black }}
+          >
+            Step in front of the mirror
+          </button>
+        </div>
+      </main>
+    )
+  }
 
   return (
     <main
@@ -240,6 +285,7 @@ export default function Mirror({ id, jwt, bag, onContinue }: MirrorProps) {
         muted
         autoPlay
         playsInline
+        onLoadedMetadata={() => setSourceReady(true)}
         className={`absolute inset-0 h-full w-full scale-x-[-1] object-cover transition-opacity ${fallback && !cameraError ? 'opacity-100' : 'opacity-0'}`}
       />
       {!fallback && jwt && (

@@ -335,7 +335,7 @@ export default function Dash() {
       {selectedFilm?.film_url && (
         <div className="fixed inset-0 z-40 flex items-center justify-center p-4" style={{ backgroundColor: COACH.black }} role="dialog" aria-modal="true" aria-label={`${selectedFilm.name || 'Guest'}'s chapter`}>
           <div className="relative w-full max-w-3xl border p-3" style={{ borderColor: COACH.tan }}>
-            <video data-testid="dashboard-film" className="max-h-[80dvh] w-full" style={{ backgroundColor: COACH.black }} src={selectedFilm.film_url} controls autoPlay />
+            <video data-testid="dashboard-film" className="max-h-[80dvh] w-full" style={{ backgroundColor: COACH.black }} src={selectedFilm.film_url} muted controls autoPlay playsInline />
             <button className="absolute right-5 top-5 border px-3 py-2 text-xs uppercase tracking-wider" style={{ backgroundColor: COACH.black, borderColor: COACH.tan, color: COACH.cream }} onClick={() => setSelectedFilm(null)} aria-label="Close film">Close</button>
           </div>
         </div>

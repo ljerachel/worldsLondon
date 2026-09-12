@@ -1,6 +1,6 @@
 import { act, fireEvent, render, screen, waitFor } from '@testing-library/react'
 import userEvent from '@testing-library/user-event'
-import { beforeEach, describe, expect, it, vi } from 'vitest'
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import { api } from '../lib/api'
 import Mirror from './Mirror'
 
@@ -49,7 +49,18 @@ function renderMirror(onContinue = vi.fn()) {
   }
 }
 
+async function stepIntoMirror() {
+  fireEvent.click(screen.getByRole('button', { name: 'Step in front of the mirror' }))
+  await act(async () => Promise.resolve())
+  return userEvent.setup()
+}
+
 describe('Mirror', () => {
+  afterEach(() => {
+    vi.useRealTimers()
+    vi.unstubAllGlobals()
+  })
+
   beforeEach(() => {
     vi.clearAllMocks()
     vi.useRealTimers()
@@ -78,9 +89,24 @@ describe('Mirror', () => {
     vi.stubGlobal('fetch', vi.fn().mockResolvedValue({ ok: true, blob: () => Promise.resolve(new Blob(['look'], { type: 'image/png' })) }))
   })
 
-  it('shows three looks and navigates them by controls and swipe', async () => {
+  it('waits for a branded camera gesture before acquiring or publishing media', async () => {
     const user = userEvent.setup()
     renderMirror()
+
+    const enter = screen.getByRole('button', { name: 'Step in front of the mirror' })
+    expect(enter).toHaveClass('min-h-14')
+    expect(mocks.getUserMedia).not.toHaveBeenCalled()
+    expect(mocks.publish).not.toHaveBeenCalled()
+
+    await user.click(enter)
+
+    await waitFor(() => expect(mocks.getUserMedia).toHaveBeenCalledOnce())
+    await waitFor(() => expect(mocks.publish).toHaveBeenCalledOnce())
+  })
+
+  it('shows three looks and navigates them by controls and swipe', async () => {
+    renderMirror()
+    const user = await stepIntoMirror()
 
     expect(screen.getByRole('heading', { name: 'Street confidence' })).toBeInTheDocument()
     expect(screen.getByText('Look 1 of 3')).toBeInTheDocument()
@@ -101,8 +127,8 @@ describe('Mirror', () => {
   })
 
   it('saves the selected look and confirms it on the real control', async () => {
-    const user = userEvent.setup()
     renderMirror()
+    const user = await stepIntoMirror()
 
     await user.click(screen.getByRole('button', { name: 'Save look' }))
 
@@ -110,9 +136,25 @@ describe('Mirror', () => {
     expect(api.sendEvent).toHaveBeenCalledWith('session-1', 'save', 0)
   })
 
+  it('prevents duplicate save calls while a save is in flight', async () => {
+    let resolveSave!: () => void
+    mocks.sendEvent.mockReturnValueOnce(new Promise<void>((resolve) => { resolveSave = resolve }))
+    renderMirror()
+    await stepIntoMirror()
+
+    const save = screen.getByRole('button', { name: 'Save look' })
+    fireEvent.click(save)
+    fireEvent.click(save)
+
+    expect(api.sendEvent).toHaveBeenCalledTimes(1)
+    resolveSave()
+    await screen.findByRole('button', { name: 'Look saved' })
+  })
+
   it('forces the live front-camera fallback immediately with a look-board PiP', async () => {
     localStorage.setItem('coach_no_reactor', '1')
     renderMirror()
+    await stepIntoMirror()
 
     expect(screen.getByText('Live camera · Try in store')).toBeInTheDocument()
     expect(screen.getByTestId('source-webcam')).toHaveClass('opacity-100')
@@ -121,28 +163,38 @@ describe('Mirror', () => {
     expect(mocks.publish).not.toHaveBeenCalled()
   })
 
-  it('falls back after eight seconds without an X2 frame', async () => {
+  it('falls back and disconnects X2 after eight seconds without a frame', async () => {
     vi.useFakeTimers()
     renderMirror()
-    await act(async () => Promise.resolve())
+    await stepIntoMirror()
 
     expect(screen.getByText('Opening live try-on')).toBeInTheDocument()
-    act(() => vi.advanceTimersByTime(8_000))
+    await act(async () => vi.advanceTimersByTimeAsync(8_000))
 
     expect(screen.getByText('Live camera · Try in store')).toBeInTheDocument()
     expect(mocks.getUserMedia).toHaveBeenCalledTimes(1)
+    expect(mocks.disconnect).toHaveBeenCalledOnce()
   })
 
-  it('captures and uploads one selfie from the source webcam after three seconds', async () => {
+  it('disconnects X2 when setup or playback failure enters fallback', async () => {
+    mocks.publish.mockRejectedValueOnce(new Error('publish failed'))
+    renderMirror()
+    await stepIntoMirror()
+
+    await waitFor(() => expect(screen.getByText('Live camera · Try in store')).toBeInTheDocument())
+    expect(mocks.disconnect).toHaveBeenCalledOnce()
+  })
+
+  it('starts the one-selfie timer only after source metadata is ready', async () => {
     vi.useFakeTimers()
     renderMirror()
-    await act(async () => Promise.resolve())
-    fireEvent.loadedMetadata(screen.getByTestId('source-webcam'))
+    await stepIntoMirror()
 
-    await act(async () => {
-      vi.advanceTimersByTime(3_000)
-      await Promise.resolve()
-    })
+    await act(async () => vi.advanceTimersByTimeAsync(3_000))
+    expect(api.uploadSelfie).not.toHaveBeenCalled()
+
+    fireEvent.loadedMetadata(screen.getByTestId('source-webcam'))
+    await act(async () => vi.advanceTimersByTimeAsync(3_000))
 
     expect(api.uploadSelfie).toHaveBeenCalledTimes(1)
     expect(api.uploadSelfie).toHaveBeenCalledWith('session-1', expect.any(Blob))
@@ -151,8 +203,8 @@ describe('Mirror', () => {
   })
 
   it('disconnects X2, stops camera media, and continues to the film stage', async () => {
-    const user = userEvent.setup()
     const { onContinue } = renderMirror()
+    const user = await stepIntoMirror()
     await waitFor(() => expect(mocks.getUserMedia).toHaveBeenCalledOnce())
 
     await user.click(screen.getByRole('button', { name: 'Continue to your chapter' }))

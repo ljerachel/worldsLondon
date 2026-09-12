@@ -156,6 +156,8 @@ describe('Dash', () => {
     expect(screen.getByRole('dialog', { name: "Maya's chapter" })).toBeInTheDocument()
     expect(screen.getByTestId('dashboard-film')).toHaveAttribute('src', maya.film_url)
     expect(screen.getByTestId('dashboard-film')).toHaveAttribute('controls')
+    expect(screen.getByTestId('dashboard-film')).toHaveProperty('autoplay', true)
+    expect(screen.getByTestId('dashboard-film')).toHaveProperty('muted', true)
     await user.click(screen.getByRole('button', { name: 'Close film' }))
     expect(screen.queryByRole('dialog')).not.toBeInTheDocument()
   })

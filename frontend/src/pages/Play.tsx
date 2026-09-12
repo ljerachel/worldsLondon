@@ -541,6 +541,7 @@ export function FilmStage({ session }: FilmStageProps) {
   const [feedback, setFeedback] = useState('')
   const [completion, setCompletion] = useState<'reserve' | 'send' | null>(session.cta)
   const [generationSeconds, setGenerationSeconds] = useState(0)
+  const filmVideoRef = useRef<HTMLVideoElement>(null)
 
   useEffect(() => {
     if (view !== 'pending') return
@@ -618,6 +619,14 @@ export function FilmStage({ session }: FilmStageProps) {
     } catch {
       setFeedback('Your chapter is ready to share when you are.')
     }
+  }
+
+  const hearChapter = () => {
+    const video = filmVideoRef.current
+    if (!video) return
+    video.currentTime = 0
+    video.muted = false
+    void video.play().catch(() => setFeedback('Tap play to hear your chapter.'))
   }
 
   const chooseCta = async (value: 'reserve' | 'send') => {
@@ -765,14 +774,17 @@ export function FilmStage({ session }: FilmStageProps) {
     <section data-testid="film-stage" data-session-id={session.id} className={shellClass} style={screenStyle}>
       <div className="mx-auto flex min-h-full w-full max-w-md flex-col">
         <BrandMark />
-        <div className="relative mx-auto mt-6 aspect-[9/16] max-h-[56dvh] w-full overflow-hidden rounded-[2rem] border border-[#B3894F]/60 bg-black shadow-[0_18px_70px_rgba(179,137,79,0.24)]">
-          <video data-testid="chapter-film" src={filmUrl ?? undefined} autoPlay loop playsInline controls className="h-full w-full object-cover" />
-          <div className="pointer-events-none absolute inset-x-0 bottom-0 bg-gradient-to-t from-black/85 to-transparent p-5 pt-16">
+        <div className="relative mx-auto mt-6 aspect-[9/16] max-h-[56dvh] w-full overflow-hidden rounded-[2rem] border shadow-[0_18px_70px_rgba(179,137,79,0.24)]" style={{ backgroundColor: COACH.black, borderColor: `${COACH.tan}99` }}>
+          <video ref={filmVideoRef} data-testid="chapter-film" src={filmUrl ?? undefined} autoPlay muted loop playsInline controls className="h-full w-full object-cover" />
+          <div className="pointer-events-none absolute inset-x-0 bottom-0 p-5 pt-16" style={{ background: `linear-gradient(to top, ${COACH.black}d9, transparent)` }}>
             <p className="font-serif text-2xl">&amp;Coach · {session.name || 'You'}, {neighbourhood}</p>
           </div>
         </div>
         <div className="mt-5 grid gap-3 pb-[max(1rem,env(safe-area-inset-bottom))]">
-          <button type="button" onClick={() => void shareFilm()} className="min-h-14 rounded-full bg-[#F3EBDD] px-6 font-medium text-[#0a0a0a] transition active:scale-[0.98]">
+          <button type="button" onClick={hearChapter} className="min-h-14 rounded-full border px-6 font-medium transition active:scale-[0.98]" style={{ backgroundColor: COACH.tan, borderColor: COACH.cream, color: COACH.black }}>
+            Hear my chapter
+          </button>
+          <button type="button" onClick={() => void shareFilm()} className="min-h-14 rounded-full px-6 font-medium transition active:scale-[0.98]" style={{ backgroundColor: COACH.cream, color: COACH.black }}>
             Share your chapter
           </button>
           <button type="button" onClick={() => void chooseCta('reserve')} className="min-h-14 rounded-full border border-[#B3894F] px-5 transition active:scale-[0.98]">
@@ -797,7 +809,6 @@ export default function Play() {
   const [tokenSettled, setTokenSettled] = useState(false)
   const [loading, setLoading] = useState(false)
   const [entryError, setEntryError] = useState('')
-  const tokenRequestRef = useRef<Promise<string | null> | null>(null)
 
   const enter = async () => {
     if (loading) return
@@ -807,7 +818,7 @@ export default function Play() {
     if (orientation?.requestPermission) void orientation.requestPermission().catch(() => 'denied')
 
     setTokenSettled(false)
-    const tokenRequest = api
+    void api
       .reactorToken()
       .then(({ jwt: token }) => {
         setJwt(token)
@@ -815,7 +826,6 @@ export default function Play() {
       })
       .catch(() => null)
       .finally(() => setTokenSettled(true))
-    tokenRequestRef.current = tokenRequest
 
     try {
       const created = await api.createSession()
@@ -864,7 +874,7 @@ export default function Play() {
         tokenSettled={tokenSettled}
         onRetryToken={() => {
           setTokenSettled(false)
-          const tokenRequest = api
+          void api
             .reactorToken()
             .then(({ jwt: token }) => {
               setJwt(token)
@@ -872,7 +882,6 @@ export default function Play() {
             })
             .catch(() => null)
             .finally(() => setTokenSettled(true))
-          tokenRequestRef.current = tokenRequest
         }}
         onEnterStore={() => {
           setStage('mirror')

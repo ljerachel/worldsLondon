@@ -158,6 +158,7 @@ describe('Play', () => {
     expect(mocks.sendEvent).toHaveBeenCalledWith('session-1', 'store_enter')
     expect(screen.getByTestId('mirror-stage')).toBeInTheDocument()
 
+    await user.click(screen.getByRole('button', { name: 'Step in front of the mirror' }))
     await user.click(screen.getByRole('button', { name: 'Continue to your chapter' }))
     expect(screen.getByTestId('film-stage')).toBeInTheDocument()
   })
@@ -189,6 +190,7 @@ describe('FilmStage', () => {
   afterEach(() => {
     vi.useRealTimers()
     vi.unstubAllGlobals()
+    vi.restoreAllMocks()
     Reflect.deleteProperty(window.navigator, 'share')
   })
 
@@ -232,6 +234,25 @@ describe('FilmStage', () => {
 
     expect(mocks.getSession).toHaveBeenCalledWith('session-1')
     expect(screen.getByTestId('chapter-film')).toHaveAttribute('src', '/api/files/films/session-1.mp4')
+  })
+
+  it('autoplays the phone film muted and restarts it with sound in the hear gesture', async () => {
+    const play = vi.spyOn(HTMLMediaElement.prototype, 'play').mockResolvedValue(undefined)
+    const user = userEvent.setup()
+    render(<FilmStage session={{ ...session, film_status: 'ready', film_url: '/chapter.mp4' }} />)
+
+    const film = screen.getByTestId('chapter-film') as HTMLVideoElement
+    expect(film).toHaveProperty('autoplay', true)
+    expect(film).toHaveProperty('muted', true)
+    const hear = screen.getByRole('button', { name: 'Hear my chapter' })
+    expect(hear).toHaveClass('min-h-14')
+
+    film.currentTime = 5
+    await user.click(hear)
+
+    expect(film.currentTime).toBe(0)
+    expect(film.muted).toBe(false)
+    expect(play).toHaveBeenCalledOnce()
   })
 
   it('cleans up the pending poll when the film stage unmounts', async () => {
