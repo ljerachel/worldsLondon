@@ -59,10 +59,28 @@ def save_still(frame: np.ndarray, path: pathlib.Path, aspect: str = "9:16") -> N
     img.crop((left, 0, left + target_w, h)).save(path)
 
 
+def fit_avatar(src_path: str, dst_path: pathlib.Path, size: tuple[int, int] = (640, 352)) -> None:
+    """Letterbox a (usually portrait) photo onto LTX's 16:9 canvas over a blurred fill.
+
+    LTX centre-crops whatever it receives to 640x352, which chops the head off a
+    phone selfie, so fit the whole frame ourselves before uploading.
+    """
+    from PIL import Image, ImageFilter, ImageOps
+
+    img = ImageOps.exif_transpose(Image.open(src_path)).convert("RGB")
+    bg = ImageOps.fit(img, size).filter(ImageFilter.GaussianBlur(24))
+    fg = ImageOps.contain(img, size)
+    bg.paste(fg, ((size[0] - fg.width) // 2, (size[1] - fg.height) // 2))
+    bg.save(dst_path, quality=92)
+
+
 async def render_take(avatar_path: str, script: str, scene_prompt: str,
                       api_key: str, wpm: int = 150,
                       timeout: float = 90.0) -> tuple[list[np.ndarray], np.ndarray | None, int, int]:
     """Run one LTX take; returns (video_frames, pcm_int16, sample_rate, channels)."""
+    fitted = pathlib.Path(avatar_path).with_name("avatar_16x9.jpg")
+    fit_avatar(avatar_path, fitted)
+    avatar_path = str(fitted)
     reactor = Reactor(model_name=LTX_MODEL, api_key=api_key)
     frames: list[np.ndarray] = []
     pcm: list[np.ndarray] = []
@@ -118,6 +136,9 @@ def encode_mp4(frames: list[np.ndarray], pcm: np.ndarray | None,
                out_path: pathlib.Path, fps: int = 24) -> None:
     """Encode buffered RGB frames (+ optional PCM) to mp4 via ffmpeg."""
     h, w = frames[0].shape[:2]
+    if pcm is not None and len(pcm):
+        # LTX streams video below nominal rate; pace frames to the audio so they stay in sync.
+        fps = max(1, round(len(frames) / (len(pcm) / sample_rate)))
     wav_path = out_path.with_suffix(".wav")
     cmd = ["ffmpeg", "-y",
            "-f", "rawvideo", "-pix_fmt", "rgb24",
