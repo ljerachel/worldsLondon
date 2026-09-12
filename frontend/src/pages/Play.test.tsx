@@ -241,6 +241,15 @@ describe('Play', () => {
     }
   })
 
+  it('explains live capacity failures and offers the optional smooth fallback', async () => {
+    mocks.openWorld.mockRejectedValueOnce(Object.assign(new Error('no available capacity'), { status: 429 }))
+    render(<Play />)
+    await reachStreet()
+    expect(await screen.findByRole('alert')).toHaveTextContent('Live world servers are busy')
+    expect(screen.getByRole('link', { name: 'Use smooth fallback' })).toHaveAttribute('href', '/play?demo=1')
+    expect(screen.getByRole('button', { name: 'Retry live street' })).toBeInTheDocument()
+  })
+
   it('calibrates the live tilt and does not chatter around the turn threshold', async () => {
     render(<Play />)
     await reachStreet()

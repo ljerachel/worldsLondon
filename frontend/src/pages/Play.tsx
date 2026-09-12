@@ -321,10 +321,13 @@ function Street({
         steerTimer = window.setInterval(() => {
           world.steer(`${session.street_prompt}, the Coach store glowing ahead, closer`)
         }, 8_000)
-      } catch {
+      } catch (error) {
         if (!cancelled) {
+          const failure = error as { status?: number; code?: string } | null
           setFallback(true)
-          setWorldError('The live street is taking a different route.')
+          setWorldError(failure?.status === 429 || failure?.code === 'RATE_LIMITED'
+            ? 'Live world servers are busy. Please try again shortly.'
+            : 'The live street is taking a different route.')
         }
       }
     }
@@ -472,7 +475,8 @@ function Street({
           className="absolute left-5 right-5 top-1/2 rounded-2xl border border-[#B3894F]/60 p-4 text-sm backdrop-blur"
           style={{ backgroundColor: `${COACH.black}b3` }}
         >
-          <p>{statusError} You can keep walking in still mode.</p>
+          <p>{statusError} Showing the street preview, not live video.</p>
+          <a href="/play?demo=1" className="mt-2 flex min-h-11 items-center underline">Use smooth fallback</a>
           <button
             type="button"
             onClick={() => {
