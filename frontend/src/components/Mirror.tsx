@@ -79,7 +79,8 @@ function LiveX2({ sourceTrack, lookIndex, bag, outputRef, onFrame, onFailure, re
       autoPlay
       playsInline
       onLoadedData={onFrame}
-      className="absolute inset-0 h-full w-full object-cover"
+      className="absolute inset-0 h-full w-full bg-black object-contain"
+      style={{ backgroundColor: COACH.black }}
     />
   )
 }
@@ -286,7 +287,8 @@ export default function Mirror({ id, jwt, bag, onContinue }: MirrorProps) {
         autoPlay
         playsInline
         onLoadedMetadata={() => setSourceReady(true)}
-        className={`absolute inset-0 h-full w-full scale-x-[-1] object-cover transition-opacity ${fallback && !cameraError ? 'opacity-100' : 'opacity-0'}`}
+        className={`absolute inset-0 h-full w-full scale-x-[-1] bg-black object-contain transition-opacity ${fallback && !cameraError ? 'opacity-100' : 'opacity-0'}`}
+        style={{ backgroundColor: COACH.black }}
       />
       {!fallback && jwt && (
         <X2Provider jwtToken={jwt} connectOptions={{ autoConnect: true }}>

@@ -163,6 +163,18 @@ describe('Mirror', () => {
     expect(mocks.publish).not.toHaveBeenCalled()
   })
 
+  it('shows the complete source and X2 frames without cropping on a Coach-black backdrop', async () => {
+    renderMirror()
+    await stepIntoMirror()
+
+    for (const video of [screen.getByTestId('source-webcam'), screen.getByTestId('x2-output')]) {
+      expect(video).toHaveClass('h-full', 'object-contain', 'bg-black')
+      expect(video).toHaveStyle({ backgroundColor: '#0a0a0a' })
+      expect(video).not.toHaveClass('object-cover')
+    }
+    expect(screen.getByTestId('source-webcam')).toHaveClass('scale-x-[-1]')
+  })
+
   it('falls back and disconnects X2 after eight seconds without a frame', async () => {
     vi.useFakeTimers()
     renderMirror()
