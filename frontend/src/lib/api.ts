@@ -22,6 +22,10 @@ export interface Session {
   cta: 'reserve' | 'send' | null
   walk_ms: number
   store_ms: number
+  immersive_entered?: boolean
+  viewed_products?: string[]
+  selected_product?: 'tabby' | 'brooklyn' | null
+  world_ms?: number
   created_at: number
 }
 
@@ -36,6 +40,16 @@ export type EventType =
   | 'share'
   | 'cta'
   | 'drop'
+  | 'immersive_enter'
+  | 'product_view'
+  | 'product_select'
+  | 'world_time'
+
+async function get<T>(path: string): Promise<T> {
+  const res = await fetch(`${BASE}${path}`)
+  if (!res.ok) throw new Error(`${path} -> ${res.status}`)
+  return res.json() as Promise<T>
+}
 
 async function post<T>(path: string, body: unknown): Promise<T> {
   const res = await fetch(`${BASE}${path}`, {
@@ -49,6 +63,9 @@ async function post<T>(path: string, body: unknown): Promise<T> {
 
 export const api = {
   createSession: () => post<{ id: string }>('/api/session', {}),
+  getImmersiveWorld: () => get<{ world_id: string | null }>('/api/immersive-world'),
+  saveImmersiveWorld: (worldId: string) =>
+    post<{ world_id: string }>('/api/immersive-world', { world_id: worldId }),
   sendAnswers: (a: {
     id: string
     name: string
@@ -84,6 +101,9 @@ export const api = {
       films: number
       shares: number
       reservations: number
+      world_entries?: number
+      product_views?: number
+      product_selections?: number
     }
   }> => {
     const res = await fetch(`${BASE}/api/state`)

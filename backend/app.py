@@ -71,6 +71,10 @@ def new_session() -> dict:
         "cta": None,
         "walk_ms": 0,
         "store_ms": 0,
+        "immersive_entered": False,
+        "viewed_products": [],
+        "selected_product": None,
+        "world_ms": 0,
         "created_at": int(time.time()),
     }
 
@@ -98,6 +102,23 @@ def create_session():
     save_session(s)
     state["sessions"] = state.get("sessions", []) + [s["id"]]
     return {"id": s["id"]}
+
+
+@web.get("/api/immersive-world")
+def immersive_world():
+    return {"world_id": state.get("immersive_world_id")}
+
+
+@web.post("/api/immersive-world")
+def save_immersive_world(body: dict):
+    raw_world_id = body.get("world_id")
+    world_id = str(raw_world_id).strip() if raw_world_id is not None else ""
+    if not world_id:
+        raise HTTPException(422, "world_id is required")
+    existing = state.get("immersive_world_id")
+    if not existing:
+        state["immersive_world_id"] = world_id
+    return {"world_id": existing or world_id}
 
 
 @web.post("/api/answers")
@@ -148,6 +169,21 @@ def event(body: dict):
         s["step"] = "done"
     elif t == "drop":
         s["step"] = "done"
+    elif t == "immersive_enter":
+        s["immersive_entered"] = True
+    elif t == "product_view":
+        if v not in ("tabby", "brooklyn"):
+            raise HTTPException(422, "invalid product")
+        viewed_products = s.get("viewed_products") or []
+        if v not in viewed_products:
+            viewed_products.append(v)
+        s["viewed_products"] = viewed_products
+    elif t == "product_select":
+        if v not in ("tabby", "brooklyn"):
+            raise HTTPException(422, "invalid product")
+        s["selected_product"] = v
+    elif t == "world_time":
+        s["world_ms"] = (s.get("world_ms") or 0) + int(v or 0)
     save_session(s)
     return {"ok": True}
 
@@ -229,6 +265,11 @@ def get_state():
         "films": sum(1 for s in sessions if s["film_status"] == "ready"),
         "shares": sum(1 for s in sessions if s["shared"]),
         "reservations": sum(1 for s in sessions if s["cta"] == "reserve"),
+        "world_entries": sum(1 for s in sessions if s.get("immersive_entered", False)),
+        "product_views": sum(len(s.get("viewed_products") or []) for s in sessions),
+        "product_selections": sum(
+            1 for s in sessions if s.get("selected_product") is not None
+        ),
     }
     return {"sessions": sessions, "counts": counts}
 
@@ -282,6 +323,13 @@ def seed(body: dict | None = None):
         s["film_url"] = SAMPLE_FILM_URL or None
         s["shared"] = random.random() < 0.3
         s["cta"] = random.choice([None, "reserve", "send"])
+        s["immersive_entered"] = random.random() < 0.7
+        if s["immersive_entered"]:
+            s["viewed_products"] = random.sample(
+                ["tabby", "brooklyn"], random.randint(0, 2)
+            )
+            s["selected_product"] = random.choice([None, *s["viewed_products"]])
+            s["world_ms"] = random.randint(5_000, 120_000)
         save_session(s)
         state["sessions"] = state.get("sessions", []) + [s["id"]]
     return {"ok": True, "n": n}
