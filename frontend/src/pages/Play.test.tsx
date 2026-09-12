@@ -148,6 +148,33 @@ describe('Play', () => {
     expect(mocks.openWorld).not.toHaveBeenCalled()
   })
 
+  it('turns immediately and stops on neutral without replaying a stale tilt', async () => {
+    render(<Play />)
+    await reachStreet()
+    vi.useFakeTimers()
+    try {
+      const tilt = (gamma: number) => {
+        const event = new Event('deviceorientation')
+        Object.defineProperty(event, 'gamma', { value: gamma })
+        fireEvent(window, event)
+      }
+
+      tilt(20)
+      expect(mocks.look).toHaveBeenLastCalledWith('right')
+      tilt(21)
+      expect(mocks.look).toHaveBeenCalledTimes(1)
+      tilt(0)
+      expect(mocks.look).toHaveBeenLastCalledWith('idle')
+      tilt(-20)
+      expect(mocks.look).toHaveBeenLastCalledWith('left')
+      tilt(0)
+      await act(async () => vi.advanceTimersByTimeAsync(350))
+      expect(mocks.look.mock.calls).toEqual([['right'], ['idle'], ['left'], ['idle']])
+    } finally {
+      vi.useRealTimers()
+    }
+  })
+
   it('enters the explicit mirror stage from the street', async () => {
     localStorage.setItem('coach_no_reactor', '1')
     render(<Play />)

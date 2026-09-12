@@ -338,23 +338,19 @@ function Street({
 
   useEffect(() => {
     let currentLook: 'left' | 'right' | 'idle' = 'idle'
-    let pendingLook: 'left' | 'right' | 'idle' = 'idle'
-    let lookTimer = 0
+    let currentWorld: WorldHandle | null = null
     const orient = (event: DeviceOrientationEvent) => {
       const gamma = event.gamma ?? 0
       setParallax(Math.max(-1, Math.min(1, gamma / 30)))
       const desired = gamma > 8 ? 'right' : gamma < -8 ? 'left' : 'idle'
-      if (desired === currentLook || desired === pendingLook) return
-      pendingLook = desired
-      window.clearTimeout(lookTimer)
-      lookTimer = window.setTimeout(() => {
-        currentLook = pendingLook
-        worldRef.current?.look(currentLook)
-      }, 300)
+      const world = worldRef.current
+      if (!world || (desired === currentLook && world === currentWorld)) return
+      currentLook = desired
+      currentWorld = world
+      world.look(desired)
     }
     window.addEventListener('deviceorientation', orient)
     return () => {
-      window.clearTimeout(lookTimer)
       window.removeEventListener('deviceorientation', orient)
     }
   }, [])
