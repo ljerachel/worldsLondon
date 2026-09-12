@@ -1,8 +1,7 @@
 fastapi[standard]
-reactor-sdk
-openai
+reactor-sdk==1.5.1
 httpx
 python-multipart
-modal
+modal==1.5.5
 numpy
 Pillow

@@ -34,27 +34,34 @@ export async function openWorld(opts: {
     void reactor.sendCommand(command, data)
   }
 
-  let firstFrame = false
-  reactor.on('trackReceived', (name: string, track: MediaStreamTrack) => {
-    if (name !== 'main_video') return
-    videoEl.srcObject = new MediaStream([track])
-    void videoEl.play()
-    if (onLatency && lastSent) onLatency(performance.now() - lastSent)
-    if (!firstFrame) {
-      firstFrame = true
-      onFirstFrame?.()
-    }
-  })
+  try {
+    let firstFrame = false
+    reactor.on('trackReceived', (name: string, track: MediaStreamTrack) => {
+      if (name !== 'main_video') return
+      videoEl.srcObject = new MediaStream([track])
+      void videoEl.play()
+      if (onLatency && lastSent) onLatency(performance.now() - lastSent)
+      if (!firstFrame) {
+        firstFrame = true
+        onFirstFrame?.()
+      }
+    })
 
-  await reactor.connect(jwt)
+    await reactor.connect(jwt)
 
-  // Anchor image must be a File — fetch the pre-generated still and upload it.
-  const blob = await (await fetch(anchorUrl)).blob()
-  const file = new File([blob], 'anchor.png', { type: blob.type || 'image/png' })
-  const ref = await reactor.uploadFile(file)
-  await reactor.sendCommand('set_image', { image: ref })
-  await reactor.sendCommand('set_prompt', { prompt })
-  await reactor.sendCommand('start', {})
+    // Anchor image must be a File — fetch the pre-generated still and upload it.
+    const blob = await (await fetch(anchorUrl)).blob()
+    const file = new File([blob], 'anchor.png', { type: blob.type || 'image/png' })
+    const ref = await reactor.uploadFile(file)
+    await reactor.sendCommand('set_image', { image: ref })
+    await reactor.sendCommand('set_prompt', { prompt })
+    await reactor.sendCommand('start', {})
+  } catch (error) {
+    try {
+      await reactor.disconnect()
+    } catch {}
+    throw error
+  }
 
   return {
     move: (dir) => send('set_move_longitudinal', { move_longitudinal: dir }),
