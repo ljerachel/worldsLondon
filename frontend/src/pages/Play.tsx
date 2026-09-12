@@ -506,17 +506,283 @@ export function MirrorStage({ session, jwt, onComplete }: MirrorStageProps) {
   )
 }
 
+const CHAPTER_LINE_ALTERNATIVES: Record<ChapterKey, [string, string]> = {
+  firstday: ['A new door. I walked through it.', 'First step taken. The rest is mine.'],
+  bignight: ['The night starts when I arrive.', 'No rules tonight. Just my story.'],
+  sunday: ['Taking my time looks good on me.', 'Today can stay beautifully unplanned.'],
+  leaving: ['The next place is calling my name.', 'I packed light and kept the courage.'],
+  meeting: ['Right on time for something real.', 'Maybe this is where the story starts.'],
+}
+
+type FilmView = 'picker' | 'pending' | 'ready' | 'failed' | 'confirmation'
+
 export function FilmStage({ session }: FilmStageProps) {
+  const chapter = CHAPTERS[session.chapter as ChapterKey]
+  const defaultLine = chapter?.line ?? session.line
+  const alternatives = CHAPTER_LINE_ALTERNATIVES[session.chapter as ChapterKey] ?? [
+    'This chapter is mine to write.',
+    'London looks different from here.',
+  ]
+  const lines = [defaultLine, ...alternatives]
+  const neighbourhood = NEIGHBOURHOODS[session.neighbourhood as NeighbourhoodKey]?.label ?? session.neighbourhood
+  const bag = BAGS[session.bag as BagKey] ?? session.bag
+  const author = session.name ? `${session.name}'s` : 'Your'
+  const [view, setView] = useState<FilmView>(() => {
+    if (session.film_status === 'ready') return session.film_url ? 'ready' : 'failed'
+    if (session.film_status === 'pending') return 'pending'
+    if (session.film_status === 'failed') return 'failed'
+    return 'picker'
+  })
+  const [selectedLine, setSelectedLine] = useState<string>(defaultLine)
+  const [filmLine, setFilmLine] = useState<string>(defaultLine)
+  const [writingCustom, setWritingCustom] = useState(false)
+  const [customLine, setCustomLine] = useState('')
+  const [filmUrl, setFilmUrl] = useState(session.film_url)
+  const [feedback, setFeedback] = useState('')
+  const [completion, setCompletion] = useState<'reserve' | 'send' | null>(session.cta)
+  const [generationSeconds, setGenerationSeconds] = useState(0)
+
+  useEffect(() => {
+    if (view !== 'pending') return
+    const ticker = window.setInterval(() => setGenerationSeconds((seconds) => seconds + 1), 1_000)
+    return () => window.clearInterval(ticker)
+  }, [view])
+
+  useEffect(() => {
+    if (view !== 'pending') return
+    let cancelled = false
+    let pollTimer = 0
+
+    const poll = async () => {
+      try {
+        const latest = await api.getSession(session.id)
+        if (cancelled) return
+        if (latest.film_status === 'ready') {
+          if (latest.film_url) {
+            setFilmUrl(latest.film_url)
+            setView('ready')
+          } else {
+            setView('failed')
+          }
+          return
+        }
+        if (latest.film_status === 'failed') {
+          setView('failed')
+          return
+        }
+      } catch {
+        if (!cancelled) setFeedback('Still connecting to the cutting room…')
+      }
+      if (!cancelled) pollTimer = window.setTimeout(() => void poll(), 2_000)
+    }
+
+    pollTimer = window.setTimeout(() => void poll(), 2_000)
+    return () => {
+      cancelled = true
+      window.clearTimeout(pollTimer)
+    }
+  }, [session.id, view])
+
+  const makeFilm = async () => {
+    const line = writingCustom ? customLine.trim() : selectedLine
+    if (!line) return
+    setFeedback('')
+    setFilmLine(line)
+    setGenerationSeconds(0)
+    setView('pending')
+    try {
+      await api.sendEvent(session.id, 'line', line)
+      const started = await api.startFilm(session.id)
+      if (started.film_status === 'failed') setView('failed')
+    } catch {
+      setView('failed')
+    }
+  }
+
+  const shareFilm = async () => {
+    if (!filmUrl) return
+    const payload = {
+      title: `&Coach · ${author} London chapter`,
+      text: `${filmLine} — &Coach`,
+      url: filmUrl,
+    }
+    try {
+      if (window.navigator.share) {
+        await window.navigator.share(payload)
+        setFeedback('Chapter shared.')
+      } else {
+        await window.navigator.clipboard.writeText(filmUrl)
+        setFeedback('Film link copied.')
+      }
+      await api.sendEvent(session.id, 'share')
+    } catch {
+      setFeedback('Your chapter is ready to share when you are.')
+    }
+  }
+
+  const chooseCta = async (value: 'reserve' | 'send') => {
+    setFeedback('')
+    try {
+      await api.sendEvent(session.id, 'cta', value)
+      setCompletion(value)
+      setView('confirmation')
+    } catch {
+      setFeedback('That next step is taking a moment. Please try again.')
+    }
+  }
+
+  const shellClass =
+    'relative h-[100dvh] w-full touch-pan-y overflow-y-auto px-6 py-8 text-[#F3EBDD] transition-opacity duration-500'
+
+  if (view === 'picker') {
+    return (
+      <section data-testid="film-stage" data-session-id={session.id} className={shellClass} style={screenStyle}>
+        <div className="mx-auto flex min-h-full w-full max-w-md flex-col">
+          <BrandMark />
+          <div className="my-auto py-8">
+            <p className="mb-3 text-xs uppercase tracking-[0.3em] text-[#B3894F]">05 · Your chapter</p>
+            <h1 className="font-serif text-5xl leading-none">Say your line.</h1>
+            <p className="mt-4 text-[#F3EBDD]/65">Choose the words that make this story yours.</p>
+            <div className="mt-7 grid gap-3">
+              {lines.map((line) => (
+                <button
+                  type="button"
+                  key={line}
+                  aria-label={`Choose line: ${line}`}
+                  aria-pressed={!writingCustom && selectedLine === line}
+                  onClick={() => {
+                    setWritingCustom(false)
+                    setSelectedLine(line)
+                  }}
+                  className={`min-h-16 rounded-3xl border px-5 py-4 text-left font-serif text-lg transition active:scale-[0.98] ${
+                    !writingCustom && selectedLine === line
+                      ? 'border-[#F3EBDD] bg-[#B3894F] text-[#0a0a0a]'
+                      : 'border-[#B3894F]/60 bg-[#0a0a0a]'
+                  }`}
+                >
+                  “{line}”
+                </button>
+              ))}
+            </div>
+            <button
+              type="button"
+              onClick={() => setWritingCustom(true)}
+              aria-pressed={writingCustom}
+              className="mt-3 min-h-14 w-full rounded-full border border-[#F3EBDD]/35 px-5 text-sm uppercase tracking-[0.16em] transition active:scale-[0.98]"
+            >
+              Write your own line
+            </button>
+            {writingCustom && (
+              <label className="mt-4 block text-sm text-[#F3EBDD]/70">
+                Your chapter line
+                <textarea
+                  autoFocus
+                  value={customLine}
+                  onChange={(event) => setCustomLine(event.target.value)}
+                  maxLength={120}
+                  rows={2}
+                  className="mt-2 min-h-20 w-full resize-none rounded-3xl border border-[#B3894F]/70 bg-transparent px-5 py-4 text-base text-[#F3EBDD] outline-none focus:border-[#F3EBDD]"
+                />
+              </label>
+            )}
+            <button
+              type="button"
+              disabled={writingCustom && !customLine.trim()}
+              onClick={() => void makeFilm()}
+              className="mt-5 min-h-16 w-full rounded-full bg-[#F3EBDD] px-6 font-medium text-[#0a0a0a] transition active:scale-[0.98] disabled:opacity-40"
+            >
+              Make my film
+            </button>
+          </div>
+        </div>
+      </section>
+    )
+  }
+
+  if (view === 'pending') {
+    return (
+      <section data-testid="film-stage" data-session-id={session.id} className={`${screenClass} flex items-end p-6`} style={screenStyle}>
+        <div
+          className="absolute inset-0 bg-cover bg-center opacity-55 motion-safe:animate-pulse"
+          style={{ backgroundImage: `url(${session.selfie_url ?? session.anchor_url})` }}
+        />
+        <div className="absolute inset-0 bg-gradient-to-t from-[#0a0a0a] via-[#0a0a0a]/35 to-[#0a0a0a]/70" />
+        <div className="absolute right-5 top-5 rounded-full border border-[#B3894F]/70 bg-[#0a0a0a]/70 px-3 py-2 text-[10px] uppercase tracking-[0.16em]">
+          LTX · {generationSeconds}s
+        </div>
+        <div className="relative w-full pb-[max(1rem,env(safe-area-inset-bottom))]">
+          <BrandMark />
+          <h1 className="mt-5 font-serif text-5xl leading-none">Cutting your chapter…</h1>
+          <p className="mt-4 text-sm uppercase tracking-[0.18em] text-[#B3894F]">
+            &amp;Coach · {session.name || 'You'}, {neighbourhood}
+          </p>
+          <p aria-live="polite" className="mt-3 min-h-6 text-sm text-[#F3EBDD]/65">
+            {feedback || 'Your nine-second London story is taking shape.'}
+          </p>
+        </div>
+      </section>
+    )
+  }
+
+  if (view === 'failed') {
+    return (
+      <section data-testid="film-stage" data-session-id={session.id} className={`${shellClass} flex items-center`} style={screenStyle}>
+        <div role="alert" className="mx-auto w-full max-w-md rounded-[2rem] border border-[#8a1f2d] bg-[#8a1f2d]/15 p-7 text-center">
+          <BrandMark />
+          <h1 className="mt-6 font-serif text-4xl">Your film couldn't be cut just yet.</h1>
+          <p className="mt-4 text-[#F3EBDD]/70">Your line is saved. Return to the cutting room whenever you're ready.</p>
+          <button
+            type="button"
+            onClick={() => {
+              setFeedback('')
+              setView('picker')
+            }}
+            className="mt-7 min-h-14 w-full rounded-full bg-[#F3EBDD] px-6 text-[#0a0a0a] transition active:scale-[0.98]"
+          >
+            Try again
+          </button>
+        </div>
+      </section>
+    )
+  }
+
+  if (view === 'confirmation') {
+    return (
+      <section data-testid="film-stage" data-session-id={session.id} className={`${shellClass} flex items-center text-center`} style={screenStyle}>
+        <div className="mx-auto w-full max-w-md">
+          <div className="mx-auto flex h-24 w-24 items-center justify-center rounded-full border border-[#B3894F] font-serif text-5xl text-[#B3894F]">C</div>
+          <p className="mt-8 text-xs uppercase tracking-[0.3em] text-[#B3894F]">&amp;Coach · Chapter complete</p>
+          <h1 className="mt-4 font-serif text-5xl leading-none">
+            {completion === 'reserve' ? 'See you on Regent Street.' : 'Your chapter is ready to travel.'}
+          </h1>
+          <p className="mt-5 text-[#F3EBDD]/70">{author} next chapter starts here, with Coach &amp; you.</p>
+        </div>
+      </section>
+    )
+  }
+
   return (
-    <section
-      data-testid="film-stage"
-      data-session-id={session.id}
-      className={`${screenClass} flex items-center justify-center px-8 text-center`}
-      style={screenStyle}
-    >
-      <div>
+    <section data-testid="film-stage" data-session-id={session.id} className={shellClass} style={screenStyle}>
+      <div className="mx-auto flex min-h-full w-full max-w-md flex-col">
         <BrandMark />
-        <h1 className="mt-6 font-serif text-5xl">Your chapter is next.</h1>
+        <div className="relative mx-auto mt-6 aspect-[9/16] max-h-[56dvh] w-full overflow-hidden rounded-[2rem] border border-[#B3894F]/60 bg-black shadow-[0_18px_70px_rgba(179,137,79,0.24)]">
+          <video data-testid="chapter-film" src={filmUrl ?? undefined} autoPlay loop playsInline controls className="h-full w-full object-cover" />
+          <div className="pointer-events-none absolute inset-x-0 bottom-0 bg-gradient-to-t from-black/85 to-transparent p-5 pt-16">
+            <p className="font-serif text-2xl">&amp;Coach · {session.name || 'You'}, {neighbourhood}</p>
+          </div>
+        </div>
+        <div className="mt-5 grid gap-3 pb-[max(1rem,env(safe-area-inset-bottom))]">
+          <button type="button" onClick={() => void shareFilm()} className="min-h-14 rounded-full bg-[#F3EBDD] px-6 font-medium text-[#0a0a0a] transition active:scale-[0.98]">
+            Share your chapter
+          </button>
+          <button type="button" onClick={() => void chooseCta('reserve')} className="min-h-14 rounded-full border border-[#B3894F] px-5 transition active:scale-[0.98]">
+            Reserve the {bag} at Coach Regent Street
+          </button>
+          <button type="button" onClick={() => void chooseCta('send')} className="min-h-14 rounded-full border border-[#F3EBDD]/35 px-5 transition active:scale-[0.98]">
+            Send to a friend
+          </button>
+          <p aria-live="polite" className="min-h-6 text-center text-sm text-[#B3894F]">{feedback}</p>
+        </div>
       </div>
     </section>
   )

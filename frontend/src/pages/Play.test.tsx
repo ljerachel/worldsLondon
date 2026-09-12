@@ -1,15 +1,17 @@
-import { render, screen, waitFor } from '@testing-library/react'
+import { act, fireEvent, render, screen, waitFor } from '@testing-library/react'
 import userEvent from '@testing-library/user-event'
-import { beforeEach, describe, expect, it, vi } from 'vitest'
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import { COACH } from '../data/config'
 import type { Session } from '../lib/api'
-import Play from './Play'
+import Play, { FilmStage } from './Play'
 
 const mocks = vi.hoisted(() => ({
   createSession: vi.fn(),
   reactorToken: vi.fn(),
   sendAnswers: vi.fn(),
   sendEvent: vi.fn(),
+  startFilm: vi.fn(),
+  getSession: vi.fn(),
   openWorld: vi.fn(),
   move: vi.fn(),
   strafe: vi.fn(),
@@ -25,6 +27,8 @@ vi.mock('../lib/api', () => ({
     reactorToken: mocks.reactorToken,
     sendAnswers: mocks.sendAnswers,
     sendEvent: mocks.sendEvent,
+    startFilm: mocks.startFilm,
+    getSession: mocks.getSession,
   },
 }))
 
@@ -76,6 +80,8 @@ describe('Play', () => {
     mocks.reactorToken.mockResolvedValue({ jwt: 'jwt-1' })
     mocks.sendAnswers.mockResolvedValue(session)
     mocks.sendEvent.mockResolvedValue({ ok: true })
+    mocks.startFilm.mockResolvedValue({ film_status: 'pending' })
+    mocks.getSession.mockResolvedValue({ ...session, film_status: 'pending' })
     mocks.openWorld.mockResolvedValue({
       move: mocks.move,
       strafe: mocks.strafe,
@@ -154,5 +160,147 @@ describe('Play', () => {
 
     await user.click(screen.getByRole('button', { name: 'Continue to your chapter' }))
     expect(screen.getByTestId('film-stage')).toBeInTheDocument()
+  })
+
+  it('emits one drop when a started experience is hidden and removes the listener on unmount', async () => {
+    const user = userEvent.setup()
+    const { unmount } = render(<Play />)
+    await user.click(screen.getByRole('button', { name: "Tap to enter Coach's London" }))
+    await screen.findByRole('heading', { name: "Where's your London?" })
+
+    Object.defineProperty(document, 'visibilityState', { configurable: true, value: 'hidden' })
+    document.dispatchEvent(new Event('visibilitychange'))
+    await waitFor(() => expect(mocks.sendEvent).toHaveBeenCalledWith('session-1', 'drop'))
+
+    unmount()
+    document.dispatchEvent(new Event('visibilitychange'))
+    expect(mocks.sendEvent.mock.calls.filter(([, type]) => type === 'drop')).toHaveLength(1)
+  })
+})
+
+describe('FilmStage', () => {
+  beforeEach(() => {
+    vi.clearAllMocks()
+    mocks.sendEvent.mockResolvedValue({ ok: true })
+    mocks.startFilm.mockResolvedValue({ film_status: 'pending' })
+    mocks.getSession.mockResolvedValue({ ...session, film_status: 'pending' })
+  })
+
+  afterEach(() => {
+    vi.useRealTimers()
+    vi.unstubAllGlobals()
+    Reflect.deleteProperty(window.navigator, 'share')
+  })
+
+  it('offers exactly three chapter-safe lines with the configured default selected first', () => {
+    render(<FilmStage session={session} />)
+
+    const choices = screen.getAllByRole('button', { name: /^Choose line:/ })
+    expect(choices).toHaveLength(3)
+    expect(choices[0]).toHaveTextContent("Tonight I'm not asking permission.")
+    expect(choices[0]).toHaveAttribute('aria-pressed', 'true')
+  })
+
+  it('accepts a custom line and sends it before requesting the film', async () => {
+    const user = userEvent.setup()
+    render(<FilmStage session={session} />)
+
+    await user.click(screen.getByRole('button', { name: 'Write your own line' }))
+    await user.type(screen.getByLabelText('Your chapter line'), 'London, meet the real me.')
+    await user.click(screen.getByRole('button', { name: 'Make my film' }))
+
+    expect(mocks.sendEvent).toHaveBeenCalledWith('session-1', 'line', 'London, meet the real me.')
+    expect(mocks.startFilm).toHaveBeenCalledWith('session-1')
+    expect(mocks.sendEvent.mock.invocationCallOrder[0]).toBeLessThan(mocks.startFilm.mock.invocationCallOrder[0])
+    expect(screen.getByText('Cutting your chapter…')).toBeInTheDocument()
+  })
+
+  it('polls every two seconds until the returned film is ready and plays that URL', async () => {
+    vi.useFakeTimers()
+    mocks.getSession.mockResolvedValueOnce({ ...session, film_status: 'ready', film_url: '/api/files/films/session-1.mp4' })
+    render(<FilmStage session={session} />)
+
+    fireEvent.click(screen.getAllByRole('button', { name: /^Choose line:/ })[1])
+    fireEvent.click(screen.getByRole('button', { name: 'Make my film' }))
+    await act(async () => undefined)
+    expect(mocks.sendEvent).toHaveBeenCalledWith('session-1', 'line', 'The night starts when I arrive.')
+    expect(screen.getByText('Cutting your chapter…')).toBeInTheDocument()
+
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(2_000)
+    })
+
+    expect(mocks.getSession).toHaveBeenCalledWith('session-1')
+    expect(screen.getByTestId('chapter-film')).toHaveAttribute('src', '/api/files/films/session-1.mp4')
+  })
+
+  it('cleans up the pending poll when the film stage unmounts', async () => {
+    vi.useFakeTimers()
+    const { unmount } = render(<FilmStage session={{ ...session, film_status: 'pending' }} />)
+
+    unmount()
+    await vi.advanceTimersByTimeAsync(2_000)
+
+    expect(mocks.getSession).not.toHaveBeenCalled()
+  })
+
+  it('stops a failed film from hanging and offers a graceful retry', async () => {
+    vi.useFakeTimers()
+    mocks.getSession.mockResolvedValueOnce({ ...session, film_status: 'failed', film_url: null })
+    render(<FilmStage session={session} />)
+
+    fireEvent.click(screen.getByRole('button', { name: 'Make my film' }))
+    await act(async () => undefined)
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(2_000)
+    })
+
+    expect(screen.getByRole('alert')).toHaveTextContent("Your film couldn't be cut just yet")
+    expect(screen.getByRole('button', { name: 'Try again' })).toBeInTheDocument()
+  })
+
+  it('copies the film URL when Web Share is unavailable and records the share', async () => {
+    const user = userEvent.setup()
+    const writeText = vi.fn().mockResolvedValue(undefined)
+    Object.defineProperty(window.navigator, 'share', { configurable: true, value: undefined })
+    Object.defineProperty(window.navigator, 'clipboard', { configurable: true, value: { writeText } })
+    render(<FilmStage session={{ ...session, film_status: 'ready', film_url: 'https://coach.test/maya.mp4' }} />)
+
+    await user.click(screen.getByRole('button', { name: 'Share your chapter' }))
+
+    expect(await screen.findByText('Film link copied.')).toBeInTheDocument()
+    expect(writeText).toHaveBeenCalledWith('https://coach.test/maya.mp4')
+    expect(mocks.sendEvent).toHaveBeenCalledWith('session-1', 'share')
+  })
+
+  it('uses Web Share with the returned film URL when supported', async () => {
+    const user = userEvent.setup()
+    const share = vi.fn().mockResolvedValue(undefined)
+    Object.defineProperty(window.navigator, 'share', { configurable: true, value: share })
+    render(<FilmStage session={{ ...session, film_status: 'ready', film_url: 'https://coach.test/maya.mp4' }} />)
+
+    await user.click(screen.getByRole('button', { name: 'Share your chapter' }))
+
+    expect(await screen.findByText('Chapter shared.')).toBeInTheDocument()
+    expect(share).toHaveBeenCalledWith(expect.objectContaining({ url: 'https://coach.test/maya.mp4' }))
+    expect(mocks.sendEvent).toHaveBeenCalledWith('session-1', 'share')
+  })
+
+  it('emits exact CTA values and replaces the actions with branded confirmation', async () => {
+    const user = userEvent.setup()
+    const readySession = { ...session, film_status: 'ready' as const, film_url: 'https://coach.test/maya.mp4' }
+    const { unmount } = render(<FilmStage session={readySession} />)
+
+    await user.click(screen.getByRole('button', { name: 'Reserve the Brooklyn at Coach Regent Street' }))
+
+    expect(mocks.sendEvent).toHaveBeenCalledWith('session-1', 'cta', 'reserve')
+    expect(screen.getByRole('heading', { name: 'See you on Regent Street.' })).toBeInTheDocument()
+    expect(screen.getByText(/Maya's next chapter/)).toBeInTheDocument()
+
+    unmount()
+    render(<FilmStage session={readySession} />)
+    await user.click(screen.getByRole('button', { name: 'Send to a friend' }))
+    expect(mocks.sendEvent).toHaveBeenCalledWith('session-1', 'cta', 'send')
+    expect(screen.getByRole('heading', { name: 'Your chapter is ready to travel.' })).toBeInTheDocument()
   })
 })
