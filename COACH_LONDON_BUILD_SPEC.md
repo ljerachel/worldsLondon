@@ -11,7 +11,7 @@ Pitch opener: "Coach's new campaign is called &Coach. The 'and' is you. But a po
 - **Reactor** — two models:
   - `reactor/lingbot-world-2`: image-anchored navigable world (WASD move + look + live prompt). The London street you walk through.
   - `reactor/x2`: live reference-guided video transformation (webcam in → re-rendered out, with `set_reference_image` for clothing/character). The in-store try-on mirror.
-- **VEED Fabric 1.0** (`veed/fabric-1.0` via fal.ai, image + audio → talking video) — the personalised "&Coach — {Name}'s chapter" film: the customer's own selfie (or their London scene) speaks their chapter line.
+- **Reactor LTX** (`reactor/ltx2`, photo + script → lip-synced talking video with joint audio, one pass — no separate TTS) — the personalised "&Coach — {Name}'s chapter" film: the customer's own selfie (or their London scene) speaks their chapter line. Replaces VEED Fabric + fal.ai; everything generative runs on Reactor credits.
 - **Modal** — the whole backend: FastAPI via `@modal.asgi_app()`, state in `modal.Dict`, background generation jobs, secrets.
 
 ## The customer's 90 seconds (phone)
@@ -23,16 +23,16 @@ Three taps (15s) — personalisation, in &Coach's language:
 - "Pick your companion" → Tabby · Brooklyn · Empire (3 bag silhouettes)
 - Optional: first name.
 
-The street (30s) — LingBot World 2 anchored on a flux still of their neighbourhood at golden hour/night in Coach's palette (tan leather, warm reds, grainy 35mm). Tilt phone to look, thumb-joystick/swipe to walk. Ahead down the street: a Coach storefront glow. Campaign-style text drifts in: "First day. Coach & you." Persistent prompt steering adds their chapter's mood.
+The street (30s) — LingBot World 2 anchored on a generated still (Helios frame grab) of their neighbourhood at golden hour/night in Coach's palette (tan leather, warm reds, grainy 35mm). Tilt phone to look, thumb-joystick/swipe to walk. Ahead down the street: a Coach storefront glow. Campaign-style text drifts in: "First day. Coach & you." Persistent prompt steering adds their chapter's mood.
 
 The store (30s) — as they approach (or after 25s, or "Enter" button), the screen flips to the mirror: front camera → Reactor X2 with `set_reference_image` = a Coach look board (their bag + campaign outfit). They see themselves wearing it, live. Swipe → next look (3 looks pre-built per bag). Tap ♥ to save.
 
-Your chapter (15s) — "Say your line" — tap one of 3 lines or type → VEED Fabric animates their selfie (grabbed from the mirror) saying it; text lockup "&Coach · {Name}, {Neighbourhood}". Share sheet, and CTA: "Reserve the Tabby at Coach Regent Street" / "Send to a friend".
+Your chapter (15s) — "Say your line" — tap one of 3 lines or type → Reactor LTX animates their selfie (grabbed from the mirror) saying it; text lockup "&Coach · {Name}, {Neighbourhood}". Share sheet, and CTA: "Reserve the Tabby at Coach Regent Street" / "Send to a friend".
 
 ## The room (projector `/dash`)
 - Map of London with a Coach-tan pulse per visitor in their neighbourhood; live counters: scans · walking · in store · try-ons · saves · chapters made · shares · reservations.
 - Look wall: each visitor's mirror still, name, neighbourhood, chapter, bag. Click → their chapter film full-screen.
-- Reasoning panel: AI strategist types out 4–6 reasoning steps → headline, media plan, neighbourhoods to localise → "Generate" → flux stills of localised posters appear in a "Ready to ship" rail.
+- Reasoning panel: AI strategist types out 4–6 reasoning steps → headline, media plan, neighbourhoods to localise → "Generate" → generated stills of localised posters appear in a "Ready to ship" rail.
 
 ## Why each judge cares
 - **Seva (world models @ Wayve)**: a navigable generated London, conditioned on 3 answers, that the user walks through. "A world model with a shop in it."
@@ -50,7 +50,7 @@ Your chapter (15s) — "Say your line" — tap one of 3 lines or type → VEED F
 | Live world | `@reactor-team/js-sdk`, `reactor/lingbot-world-2` (needs `set_image` + `set_prompt` before `start`) |
 | Live try-on | `@reactor-team/js-sdk`, `reactor/x2` — publish webcam to inbound track `source` (SDK `WebcamStream track="source"`), `set_reference_image`, `set_prompt`; render `main_video` |
 | Reactor auth | Modal `POST /api/reactor-token` → `POST https://api.reactor.inc/tokens` header `Reactor-API-Key` → `{jwt}` |
-| Generation | fal.ai Python `fal-client` on Modal: `fal-ai/flux/schnell` (neighbourhood stills, look boards, posters), `fal-ai/elevenlabs/tts/turbo-v2.5` (voice), `veed/fabric-1.0` (film) |
+| Generation | Reactor Python `reactor-sdk` on Modal: `reactor/helios` frame grabs (neighbourhood stills, look boards, posters), `reactor/ltx2` (film: avatar photo + script → video+audio in one pass). Output files stored on `modal.Volume` `coach-files`, served via `GET /api/files/{path}` |
 | LLM | OpenAI `gpt-4o-mini` JSON mode (prompt builder, reasoning) |
 | QR / Map / Motion | `qrcode.react`, a static SVG of London boroughs (hand-drawn 6 zones is fine) or `react-simple-maps` with a London geojson, `framer-motion` |
 
@@ -73,7 +73,7 @@ coach-london/
   RUNBOOK.md
 ```
 
-Keys to collect at minute 0: `REACTOR_API_KEY` (rk_…), `FAL_KEY`, `OPENAI_API_KEY`; Modal account (`pip install modal && modal setup`); Vercel account.
+Keys to collect at minute 0: `REACTOR_API_KEY` (rk_…), `OPENAI_API_KEY`; Modal account (`pip install modal && modal setup`); Vercel account. No fal.ai key needed — all generation runs on Reactor.
 
 ## 1. Shared contracts (everyone codes against these)
 
@@ -116,13 +116,14 @@ step: opened | questions | street | store | film | done — film_status: none | 
 | POST | `/api/session` | `{}` → `{id}` |
 | POST | `/api/answers` | `{id,name,neighbourhood,chapter,bag}` → session with `street_prompt`, `anchor_url`, `line` |
 | POST | `/api/event` | `{id,type,value?}` → `{ok}`. Types: `street_enter, walk(ms), store_enter, look(index), save(index), selfie(url), line(text), share, cta(reserve|send), drop` |
-| POST | `/api/selfie` | multipart `{id, file}` → uploads to fal storage → `{selfie_url}` (saved on session) |
+| POST | `/api/selfie` | multipart `{id, file}` → stored on `coach-files` volume → `{selfie_url}` (saved on session) |
 | POST | `/api/film` | `{id}` → `{film_status:"pending"}`; spawns `make_film(id)` |
 | POST | `/api/reactor-token` | `{}` → `{jwt}` |
 | GET | `/api/session/{id}` | → session |
 | GET | `/api/state` | → `{sessions:[…], counts:{scans,walking,in_store,tryons,saves,films,shares,reservations}}` |
 | POST | `/api/insight` | `{}` → `{headline, reasoning[], segments[], media_plan[], localise[]}` |
-| POST | `/api/localise` | `{neighbourhoods:[…], bag, chapter}` → `{posters:[{neighbourhood,url}]}` (flux) |
+| POST | `/api/localise` | `{neighbourhoods:[…], bag, chapter}` → `{posters:[{neighbourhood,url}]}` (Helios stills) |
+| GET | `/api/files/{path}` | serves generated files (selfies, films, posters) from the `coach-files` volume |
 | POST | `/api/seed` `{n}` · POST `/api/reset` | |
 
 ### Reactor command cheat-sheet
@@ -168,7 +169,7 @@ import modal, os
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 app = modal.App("coach-london")
-image = modal.Image.debian_slim().pip_install("fastapi[standard]", "fal-client", "openai", "httpx", "python-multipart")
+image = modal.Image.debian_slim().pip_install("fastapi[standard]", "reactor-sdk", "openai", "httpx", "python-multipart", "numpy", "Pillow")
 state = modal.Dict.from_name("coach-state", create_if_missing=True)
 web = FastAPI(); web.add_middleware(CORSMiddleware, allow_origins=["*"], allow_methods=["*"], allow_headers=["*"])
 @web.get("/api/health")
@@ -177,7 +178,7 @@ def health(): return {"ok": True}
 @modal.asgi_app()
 def fastapi_app(): return web
 ```
-`modal secret create coach-secrets REACTOR_API_KEY=… FAL_KEY=… OPENAI_API_KEY=…` → `modal deploy backend/app.py`
+`modal secret create coach-secrets REACTOR_API_KEY=… OPENAI_API_KEY=…` → `modal deploy backend/app.py`
 - [ ] `npx create-reactor-app reactor-probe --model=lingbot-world-2` in scratch; run it with the key; confirm you see video. Repeat with `--model=x2` if supported. This 10 minutes de-risks the whole demo.
 - [ ] Commit `config.ts` exactly as Section 1. Lock the 3-min script (Section 4).
 
@@ -201,22 +202,22 @@ def fastapi_app(): return web
 ### Builder B — Content + backend generation (backend + assets)
 **0:25 – 1:30 · Anchors, look boards, prompts**
 1. `prompts.py`: `street_prompt(s)`: `f"First-person view walking down a street in {N.label}, London, {N.cue}, {C.mood}, a warm glowing Coach boutique with tan leather window display at the end of the street, cinematic 35mm film grain, Coach campaign colour palette of tan leather, cream and deep red"`
-2. Anchor stills (30 = 6 neighbourhoods × 5 chapters) via `fal-ai/flux/schnell`, `image_size: "portrait_16_9"`. Save to `frontend/public/neigh/{n}-{c}.png`. If short on time: 6 × 2 chapters, map others to nearest mood.
-3. Look boards (9): `fal-ai/flux/dev`: `f"full-body fashion editorial photo of a model wearing a {outfit} and carrying a Coach {bag} bag in tan leather, neutral studio backdrop, &Coach campaign style, natural confident pose"` — 3 outfits per bag (streetwear / tailored / evening). Save `public/looks/{bag}-{i}.png`.
-4. Test `veed/fabric-1.0` once in the fal playground with a selfie + mp3; note `result["video"]["url"]`.
+2. Anchor stills (30 = 6 neighbourhoods × 5 chapters) via Helios frame grabs (`reactor_utils.grab_still`, cropped to 9:16 portrait). Save to `frontend/public/neigh/{n}-{c}.png`. If short on time: 6 × 2 chapters, map others to nearest mood.
+3. Look boards (9): same Helios path: `f"full-body fashion editorial photo of a model wearing a {outfit} and carrying a Coach {bag} bag in tan leather, neutral studio backdrop, &Coach campaign style, natural confident pose"` — 3 outfits per bag (streetwear / tailored / evening). Save `public/looks/{bag}-{i}.png`.
+4. Probe `reactor/ltx2` once with a selfie + short script (`npx create-reactor-app ltx-probe --model=ltx2`); confirm video+audio lands.
 
 **1:30 – 3:00 · `/api/answers`, `/api/selfie`, `make_film`**
 5. `/api/answers`: fill `street_prompt`, `anchor_url` (`/neigh/{n}-{c}.png`, absolute using `FRONTEND_ORIGIN` env), default `line`.
-6. `/api/selfie`: receive JPEG, `fal_client.upload(bytes, "image/jpeg")` → URL → save.
+6. `/api/selfie`: receive JPEG → write to `coach-files` volume (`selfies/{id}.jpg`) → `selfie_url` = `/api/files/…` → save.
 7. `make_film(id)` (Modal function, `timeout=300`):
    - script = `f"{line} … &Coach."` (≤ 4s of speech)
-   - TTS: `fal_client.subscribe("fal-ai/elevenlabs/tts/turbo-v2.5", {"text": script, "voice": "Rachel"})` → audio url
-   - Film: `fal_client.subscribe("veed/fabric-1.0", {"image_url": selfie_url or anchor_url, "audio_url": audio_url, "resolution": "480p"})` → `film_url`, `film_status="ready"`. On exception → `failed` + `SAMPLE_FILM_URL`.
+   - avatar = selfie JPEG from the volume, else fetched `anchor_url`
+   - `reactor_utils.render_take` drives `reactor/ltx2` (`upload_file` → `set_avatar_image` → `set_script` → `set_prompt` → `start`), buffers `main_video` frames + `main_audio` PCM until `generation_complete`, then `encode_mp4` (ffmpeg) → `films/{id}.mp4` on the volume → `film_url`, `film_status="ready"`. On exception → `failed` + `SAMPLE_FILM_URL`.
    - Pre-generate `SAMPLE_FILM_URL` with a stock portrait for seeds/failures.
 
 **3:00 – 4:00 · Insight + localise**
 8. `/api/insight`: aggregate sessions → `gpt-4o-mini` JSON: system = "You are Coach's London media strategist for the &Coach platform. Reason step by step (4–6 short steps) over visitors' neighbourhood, chapter, bag, saved looks, store time, shares, reservations. Output: headline (≤12 words), segments (2–3 with %), media_plan (3 bullets: OOH sites, dayparts, creative angle), localise (top 3 neighbourhoods)". Cache 10s.
-9. `/api/localise`: for each neighbourhood → `fal-ai/flux/schnell` poster: `f"Coach outdoor poster, {N.label} London street scene, {C.mood}, model with Coach {bag}, headline text '{C.label}. &Coach', tan and cream palette"` → URLs.
+9. `/api/localise`: for each neighbourhood → Helios still poster: `f"Coach outdoor poster, {N.label} London street scene, {C.mood}, model with Coach {bag}, headline text '{C.label}. &Coach', tan and cream palette"` → URLs.
 
 ### Builder C — Mirror (X2), dashboard, QR, ops
 **0:25 – 1:30 · Backend plumbing + QR**
@@ -236,13 +237,13 @@ def fastapi_app(): return web
 Real phones iOS + Android, venue wifi + hotspot. Full flow < 3:00. Check: camera permission flow, gyro permission, LingBot first frame < 8s, X2 first frame < 8s, film < 60s, pins drop. Record backup video. **Freeze 4:20.**
 
 ### 4:40 – 5:00 · Pitch
-Slides (5): 1) Poster photo + "&Coach. The 'and' is you." 2) LIVE demo 3) What happened: navigable world (LingBot World 2) → live try-on (X2) → personal film (VEED) → reasoning, all on Modal 4) Business: experiential OOH that converts — per-scan pricing + reservation attribution + UGC 5) Built in 5h with Devin. Roles: speaker · laptop (Dash + hotkeys) · phone handler/filmer.
+Slides (5): 1) Poster photo + "&Coach. The 'and' is you." 2) LIVE demo 3) What happened: navigable world (LingBot World 2) → live try-on (X2) → personal film (LTX) → reasoning, all on Modal 4) Business: experiential OOH that converts — per-scan pricing + reservation attribution + UGC 5) Built in 5h with Devin. Roles: speaker · laptop (Dash + hotkeys) · phone handler/filmer.
 
 ## 3. Agent-ready tickets (paste one at a time)
 - **T1 (all):** Scaffold `coach-london/` with `frontend/` (Vite React TS, Tailwind, react-router-dom, framer-motion, qrcode.react, @reactor-team/js-sdk) routes `/`, `/play`, `/dash`; `backend/app.py` Modal FastAPI hello world; `frontend/src/data/config.ts`. Commit.
 - **T2 (C):** Implement all Section 1 endpoints except `/api/answers`, `/api/selfie`, `/api/film`, `/api/insight`, `/api/localise`, using `modal.Dict` helpers `get_session/save_session/all_sessions`. `/api/reactor-token` proxies Reactor tokens. Add `/api/seed`, `/api/reset`.
-- **T3 (B):** `backend/prompts.py` with `street_prompt`, `look_prompt`, `poster_prompt`, `INSIGHT_SYSTEM`; script `backend/gen_assets.py` generating 30 anchor stills + 9 look boards via fal into `frontend/public/{neigh,looks}/`.
-- **T4 (B):** `/api/answers`, `/api/selfie` (fal upload), `/api/film` + Modal function `make_film` (TTS → `veed/fabric-1.0`), `SAMPLE_FILM_URL` fallback, timings logged.
+- **T3 (B):** `backend/prompts.py` with `street_prompt`, `look_prompt`, `poster_prompt`, `INSIGHT_SYSTEM`; script `backend/gen_assets.py` generating 30 anchor stills + 9 look boards via Reactor Helios frame grabs into `frontend/public/{neigh,looks}/`.
+- **T4 (B):** `/api/answers`, `/api/selfie` (volume upload), `/api/film` + Modal function `make_film` (Reactor `reactor/ltx2` take → mp4 on volume), `SAMPLE_FILM_URL` fallback, timings logged.
 - **T5 (A):** `Play.tsx` screens 1–3 + `lib/world.ts` (LingBot World 2 per cheat-sheet; 8s fallback to still).
 - **T6 (C):** `components/Mirror.tsx` (X2 with WebcamStream `source`, reference image swap on swipe, ♥ save, auto-selfie → `/api/selfie`, 8s fallback).
 - **T7 (A):** Screen 5 film (line picker → `/api/film` → poll → play), share/CTA buttons, drop event, latency badge, transitions.

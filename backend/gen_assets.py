@@ -1,50 +1,57 @@
-"""Generate anchor stills + look boards via fal.ai into frontend/public/.
+"""Generate anchor stills + look boards via Reactor Helios into frontend/public/.
 
-Usage: FAL_KEY=... python gen_assets.py [--quick]
+Reactor has no text-to-image model, so each still is a frame captured from a
+short Helios generation, centre-cropped to portrait.
+
+Usage: REACTOR_API_KEY=... python gen_assets.py [--quick]
   --quick: 6 neighbourhoods x 2 chapters (12 anchors) instead of all 30.
 """
 import argparse
+import asyncio
 import os
 import pathlib
 
-import fal_client
 import prompts
+import reactor_utils
 
 OUT = pathlib.Path(__file__).resolve().parent.parent / "frontend" / "public"
+CONCURRENCY = 4
 
 
-def gen(prompt: str, path: pathlib.Path, model: str = "fal-ai/flux/schnell") -> None:
+async def gen(prompt: str, path: pathlib.Path, sem: asyncio.Semaphore) -> None:
     if path.exists():
         print(f"skip {path.name}")
         return
-    result = fal_client.subscribe(model, arguments={"prompt": prompt, "image_size": "portrait_16_9"})
-    url = result["images"][0]["url"]
-    import httpx
-
-    path.write_bytes(httpx.get(url).content)
-    print(f"wrote {path}")
+    async with sem:
+        frame = await reactor_utils.grab_still(prompt, os.environ["REACTOR_API_KEY"])
+        reactor_utils.save_still(frame, path, aspect="9:16")
+        print(f"wrote {path}")
 
 
-def main() -> None:
+async def main_async() -> None:
     p = argparse.ArgumentParser()
     p.add_argument("--quick", action="store_true")
     args = p.parse_args()
 
+    sem = asyncio.Semaphore(CONCURRENCY)
+    tasks = []
     chapters = list(prompts.CHAPTERS)[: 2 if args.quick else len(prompts.CHAPTERS)]
     for n in prompts.NEIGHBOURHOODS:
         for c in chapters:
-            gen(
+            tasks.append(gen(
                 prompts.street_prompt({"neighbourhood": n, "chapter": c}),
                 OUT / "neigh" / f"{n}-{c}.png",
-            )
+                sem,
+            ))
     for bag in prompts.BAGS:
         for i, style in enumerate(prompts.LOOK_STYLES, start=1):
-            gen(
+            tasks.append(gen(
                 prompts.look_prompt(bag, style),
                 OUT / "looks" / f"{bag}-{i}.png",
-                model="fal-ai/flux/dev",
-            )
+                sem,
+            ))
+    await asyncio.gather(*tasks)
 
 
 if __name__ == "__main__":
-    main()
+    asyncio.run(main_async())

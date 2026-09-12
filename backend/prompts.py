@@ -54,6 +54,16 @@ def film_script(line: str) -> str:
     return f"{line} … &Coach."
 
 
+def film_prompt(s: dict) -> str:
+    """LTX scene/delivery prompt — casts the voice and shot for the take."""
+    mood = CHAPTERS.get(s.get("chapter", ""), {}).get("mood", "")
+    return (
+        "warm confident young Londoner speaking straight to camera, natural "
+        f"British accent, gentle smile, cinematic soft light, {mood}, "
+        "&Coach campaign energy"
+    )
+
+
 INSIGHT_SYSTEM = (
     "You are Coach's London media strategist for the &Coach platform. Reason step by "
     "step (4-6 short steps) over visitors' neighbourhood, chapter, bag, saved looks, "

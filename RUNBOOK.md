@@ -9,7 +9,7 @@ Backend (Modal):
 pip install -r backend/requirements.txt
 modal setup
 modal secret create coach-secrets \
-  REACTOR_API_KEY=rk_... FAL_KEY=... OPENAI_API_KEY=... \
+  REACTOR_API_KEY=rk_... OPENAI_API_KEY=... \
   FRONTEND_ORIGIN=https://<vercel-url> SAMPLE_FILM_URL=https://...
 modal deploy backend/app.py        # production URL
 modal serve backend/app.py         # ephemeral dev URL (changes on restart!)
@@ -37,4 +37,6 @@ Keep a copy on a phone + USB.
 ## Demo-day settings
 - `min_containers=1` is already set on `fastapi_app` — keep it for demo hour.
 - Hotspot as backup for venue wifi. Both Vercel and Modal are CDN-fronted.
-- `SAMPLE_FILM_URL`: pre-generate one VEED Fabric film with a stock portrait; also used for seeds + failures.
+- `SAMPLE_FILM_URL`: pre-generate one LTX film with a stock portrait; also used for seeds + failures.
+- Generated files (selfies, films, posters) live on the Modal volume `coach-files` and are served at `GET /api/files/{path}`. Films land at `/api/files/films/{session_id}.mp4`.
+- Asset generation: `cd backend && REACTOR_API_KEY=... python gen_assets.py --quick` (Helios frame grabs, no fal key needed).

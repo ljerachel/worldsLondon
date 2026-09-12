@@ -14,21 +14,30 @@ Manual curl examples (replace $BASE with the deployed URL):
 """
 
 import os
+import pathlib
 import random
 import secrets as pysecrets
 import time
 
 import modal
-from fastapi import FastAPI, UploadFile
+from fastapi import FastAPI, File, Form, Request, UploadFile
 from fastapi.middleware.cors import CORSMiddleware
+from fastapi.responses import FileResponse
 
 app = modal.App("coach-london")
 image = (
     modal.Image.debian_slim()
-    .pip_install("fastapi[standard]", "fal-client", "openai", "httpx", "python-multipart")
+    .apt_install("ffmpeg")
+    .pip_install(
+        "fastapi[standard]", "reactor-sdk", "openai", "httpx",
+        "python-multipart", "numpy", "Pillow",
+    )
     .add_local_file("prompts.py", "/root/prompts.py")
+    .add_local_file("reactor_utils.py", "/root/reactor_utils.py")
 )
 state = modal.Dict.from_name("coach-state", create_if_missing=True)
+files_vol = modal.Volume.from_name("coach-files", create_if_missing=True)
+FILES = "/files"
 
 web = FastAPI()
 web.add_middleware(
@@ -39,6 +48,7 @@ SAMPLE_FILM_URL = os.environ.get("SAMPLE_FILM_URL", "")
 FRONTEND_ORIGIN = os.environ.get("FRONTEND_ORIGIN", "")
 
 import prompts  # noqa: E402  (added to the Modal image above; also importable locally)
+import reactor_utils  # noqa: E402
 
 
 def new_session() -> dict:
@@ -143,26 +153,43 @@ def event(body: dict):
 
 
 @web.post("/api/selfie")
-async def selfie(id: str, file: UploadFile):
-    import fal_client
-
+async def selfie(request: Request, id: str = Form(...), file: UploadFile = File(...)):
     s = get_session(id)
     if s is None:
         return {"error": "unknown session"}, 404
     data = await file.read()
-    url = fal_client.upload(data, "image/jpeg")
+    path = pathlib.Path(FILES) / "selfies" / f"{id}.jpg"
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_bytes(data)
+    files_vol.commit()
+    url = f"{request.base_url}api/files/selfies/{id}.jpg"
     s["selfie_url"] = url
     save_session(s)
     return {"selfie_url": url}
 
 
+@web.get("/api/files/{path:path}")
+def get_file(path: str):
+    p = (pathlib.Path(FILES) / path).resolve()
+    if not str(p).startswith(FILES + "/"):
+        return {"error": "not found"}, 404
+    try:
+        files_vol.reload()
+    except Exception:
+        pass
+    if not p.is_file():
+        return {"error": "not found"}, 404
+    return FileResponse(p)
+
+
 @web.post("/api/film")
-def film(body: dict):
+def film(request: Request, body: dict):
     s = get_session(body["id"])
     if s is None:
         return {"error": "unknown session"}, 404
     s["film_status"] = "pending"
     s["step"] = "film"
+    s["_origin"] = str(request.base_url)
     save_session(s)
     make_film.spawn(s["id"])
     return {"film_status": "pending"}
@@ -232,17 +259,24 @@ def insight():
 
 
 @web.post("/api/localise")
-def localise(body: dict):
-    import fal_client
+def localise(request: Request, body: dict):
+    import asyncio
 
     posters = []
     for n in body["neighbourhoods"]:
-        prompt = prompts.poster_prompt(n, body["chapter"], body["bag"])
-        result = fal_client.subscribe(
-            "fal-ai/flux/schnell",
-            arguments={"prompt": prompt, "image_size": "portrait_4_3"},
+        rel = f"posters/{n}-{body['chapter']}-{body['bag']}.jpg"
+        path = pathlib.Path(FILES) / rel
+        if not path.is_file():
+            prompt = prompts.poster_prompt(n, body["chapter"], body["bag"])
+            frame = asyncio.run(
+                reactor_utils.grab_still(prompt, os.environ["REACTOR_API_KEY"])
+            )
+            path.parent.mkdir(parents=True, exist_ok=True)
+            reactor_utils.save_still(frame, path, aspect="3:4")
+            files_vol.commit()
+        posters.append(
+            {"neighbourhood": n, "url": f"{request.base_url}api/files/{rel}"}
         )
-        posters.append({"neighbourhood": n, "url": result["images"][0]["url"]})
     return {"posters": posters}
 
 
@@ -288,31 +322,43 @@ def reset():
 @app.function(
     image=image,
     secrets=[modal.Secret.from_name("coach-secrets")],
+    volumes={FILES: files_vol},
     timeout=300,
 )
 def make_film(sid: str) -> None:
-    import fal_client
+    import asyncio
+    import tempfile
+
+    import httpx
 
     s = get_session(sid)
     if s is None:
         return
     t0 = time.time()
     try:
-        audio = fal_client.subscribe(
-            "fal-ai/elevenlabs/tts/turbo-v2.5",
-            arguments={"text": prompts.film_script(s["line"]), "voice": "Rachel"},
-        )
-        audio_url = audio["audio"]["url"] if "audio" in audio else audio["audio_url"]
-        print(f"[make_film {sid}] tts {time.time()-t0:.1f}s")
-        video = fal_client.subscribe(
-            "veed/fabric-1.0",
-            arguments={
-                "image_url": s["selfie_url"] or s["anchor_url"],
-                "audio_url": audio_url,
-                "resolution": "480p",
-            },
-        )
-        s["film_url"] = video["video"]["url"]
+        files_vol.reload()
+        with tempfile.TemporaryDirectory() as td:
+            avatar = pathlib.Path(td) / "avatar.jpg"
+            selfie_path = pathlib.Path(FILES) / "selfies" / f"{sid}.jpg"
+            if selfie_path.is_file():
+                avatar.write_bytes(selfie_path.read_bytes())
+            else:
+                r = httpx.get(s["anchor_url"], timeout=30)
+                r.raise_for_status()
+                avatar.write_bytes(r.content)
+            frames, pcm, sr, ch = asyncio.run(
+                reactor_utils.render_take(
+                    str(avatar),
+                    prompts.film_script(s["line"]),
+                    prompts.film_prompt(s),
+                    os.environ["REACTOR_API_KEY"],
+                )
+            )
+            out = pathlib.Path(FILES) / "films" / f"{sid}.mp4"
+            out.parent.mkdir(parents=True, exist_ok=True)
+            reactor_utils.encode_mp4(frames, pcm, sr, ch, out)
+            files_vol.commit()
+        s["film_url"] = f"{s.get('_origin', '')}api/files/films/{sid}.mp4"
         s["film_status"] = "ready"
         print(f"[make_film {sid}] total {time.time()-t0:.1f}s")
     except Exception as e:  # never leave the phone hanging
@@ -325,6 +371,7 @@ def make_film(sid: str) -> None:
 @app.function(
     image=image,
     secrets=[modal.Secret.from_name("coach-secrets")],
+    volumes={FILES: files_vol},
     min_containers=1,
 )
 @modal.asgi_app()
